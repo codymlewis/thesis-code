@@ -1,0 +1,9 @@
+jax
+flax
+optax
+datasets
+polars
+einops
+Pillow
+tqdm
+scikit-learn
