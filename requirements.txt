@@ -7,3 +7,5 @@ einops
 Pillow
 tqdm
 scikit-learn
+psutil
+matplotlib
