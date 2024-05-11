@@ -43,6 +43,27 @@ class ConvLeNet_300_100(nn.Module):
         return x
 
 
+class LeNet5(nn.Module):
+    classes: int = 10
+
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Conv(6, (5, 5), padding="VALID")(x)
+        x = nn.relu(x)
+        x = nn.avg_pool(x, (2, 2), (2, 2))
+        x = nn.Conv(16, (5, 5), padding="SAME")(x)
+        x = nn.relu(x)
+        x = nn.avg_pool(x, (2, 2), (2, 2))
+        x = einops.rearrange(x, "b h w c -> b (h w c)")
+        x = nn.Dense(120)(x)
+        x = nn.relu(x)
+        x = nn.Dense(84)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.classes)(x)
+        x = nn.softmax(x)
+        return x
+
+
 @jax.jit
 def learner_step(
     state: train_state.TrainState,
@@ -93,6 +114,40 @@ def krum(all_grads, _state):
     return unflattener(jnp.mean(X[idx], axis=0)), _state
 
 
+class FoolsGoldState(NamedTuple):
+    kappa: float
+    histories: chex.Array
+
+
+@jax.jit
+def foolsgold(all_grads, state):
+    "Code adapted from https://github.com/DistributedML/FoolsGold"
+    histories = jnp.array([h + jax.flatten_util.ravel_pytree(g)[0] for h, g in zip(state.histories, all_grads)])
+    nclients = histories.shape[0]
+    cs = jax.vmap(
+        lambda h1: jax.vmap(lambda h2: jnp.dot(h1, h2) / (jnp.linalg.norm(h1) * jnp.linalg.norm(h2)))(histories)
+    )(histories) - jnp.eye(nclients)
+    maxcs = jnp.max(cs, axis=1)
+    # pardoning
+    pardon_idx = jax.vmap(lambda i: jax.vmap(
+        lambda j: (maxcs[i] < maxcs[j]) * (maxcs[i] / maxcs[j]))(jnp.arange(nclients))
+    )(jnp.arange(nclients))
+    cs = jnp.where(pardon_idx > 0, cs * pardon_idx, cs)
+    # Prevent invalid values
+    wv = 1 - (jnp.max(cs, axis=1))
+    wv = jnp.where(wv > 1, 1, wv)
+    wv = jnp.where(wv < 0, 0, wv)
+    wv = wv / jnp.max(wv)  # Rescale to [0, 1]
+    wv = jnp.where(wv == 1, 0.99, wv)
+    wv = jnp.where(wv != 0, state.kappa * (jnp.log(wv / (1 - wv)) + 0.5), wv)  # Logit function
+    wv = jnp.where(jnp.isinf(wv) + wv > 1, 1, wv)
+    wv = jnp.where(wv < 1, 0, wv)
+    return (
+        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * wv).T, axis=0), *all_grads),
+        FoolsGoldState(kappa=state.kappa, histories=histories),
+    )
+
+
 @jax.jit
 def tree_sub(tree_a, tree_b):
     return jax.tree_util.tree_map(lambda a, b: a - b, tree_a, tree_b)
@@ -118,7 +173,7 @@ def accuracy(state, X, Y, batch_size=1000):
 
 
 class Server:
-    def __init__(self, clients, batch_size, aggregator="fedavg"):
+    def __init__(self, state, clients, batch_size, aggregator="fedavg"):
         self.clients = clients
         self.batch_size = batch_size
         match aggregator:
@@ -131,6 +186,14 @@ class Server:
             case "krum":
                 self.aggregate_fn = krum
                 self.aggregate_state = None
+            case "foolsgold":
+                self.aggregate_fn = foolsgold
+                self.aggregate_state = FoolsGoldState(
+                    kappa=1.0,
+                    histories=jnp.array([
+                        jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
+                    ])
+                )
             case _:
                 raise NotImplementedError(f"{aggregator} not implemented")
 

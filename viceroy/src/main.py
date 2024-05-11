@@ -76,7 +76,7 @@ def lda(labels: Iterable[int], nclients: int, nclasses: int, rng: np.random.Gene
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Perform the Viceroy experiments")
     parser.add_argument('-s', '--seed', type=int, default=42, help="Seed for random number generation operations.")
-    parser.add_argument('-b', '--batch-size', type=int, default=8, help="Training and evaluation batch size.")
+    parser.add_argument('-b', '--batch-size', type=int, default=128, help="Training and evaluation batch size.")
     parser.add_argument('-d', '--dataset', type=str, default="mnist", help="Dataset to train on.")
     parser.add_argument("-a", "--aggregator", type=str, default="fedavg", help="Aggregation function to use.")
     parser.add_argument("-c", "--clients", type=int, default=10, help="Number of clients to train.")
@@ -94,7 +94,7 @@ if __name__ == "__main__":
             raise NotImplementedError(f"{args.dataset} not implemented")
 
     if args.dataset == "cifar10":
-        model = fl.ConvLeNet_300_100(nclasses)
+        model = fl.LeNet5(nclasses)
     else:
         model = fl.LeNet_300_100(nclasses)
     global_state = train_state.TrainState.create(
@@ -110,6 +110,7 @@ if __name__ == "__main__":
         alpha=0.5 if args.aggregator in ["foolsgold", "contra"] else 1000,
     )
     server = fl.Server(
+        global_state,
         [
             fl.Client({'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]}, seed=args.seed + i)
             for i, didx in enumerate(data_distribution)
