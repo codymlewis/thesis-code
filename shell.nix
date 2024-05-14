@@ -5,6 +5,7 @@
     python312
     python312Packages.pip
     python312Packages.virtualenv
+    pciutils
     zlib
   ]);
   runScript = ''
@@ -12,6 +13,8 @@
     virtualenv venv
     source venv/bin/activate
     pip install -r requirements.txt
+    [[ $(lspci | grep 'NVIDIA') ]] && \
+      pip install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
     bash
   '';
 }).env
