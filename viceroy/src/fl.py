@@ -1,5 +1,5 @@
+import sys
 from typing import Tuple, NamedTuple
-from functools import partial
 import numpy as np
 from sklearn import metrics as skm
 import jax
@@ -148,6 +148,115 @@ def foolsgold(all_grads, state):
     )
 
 
+class ContraState(NamedTuple):
+    delta: float
+    "Amount the increase/decrease the reputation (selection likelihood) by."
+    t: float
+    "Threshold for choosing when to increase the reputation."
+    reputations: chex.Array
+    "Reputations of the clients"
+    histories: chex.Array
+    rng_key: jax.random.PRNGKey
+
+
+@jax.jit
+def contra(all_grads, state):
+    C = 0.1
+    lamb = C * (1 - C)
+    nadv = 5
+    histories = jnp.array([h + jax.flatten_util.ravel_pytree(g)[0] for h, g in zip(state.histories, all_grads)])
+    nclients = histories.shape[0]
+    p = C + lamb * state.reputations
+    p = p / np.sum(p)
+    cs = jnp.abs(jax.vmap(
+        lambda h1: jax.vmap(lambda h2: jnp.dot(h1, h2) / (jnp.linalg.norm(h1) * jnp.linalg.norm(h2)))(histories)
+    )(histories) - jnp.eye(nclients))
+    taus = (-jnp.partition(-cs, nadv - 1, axis=1)[:, :nadv]).mean(axis=1)
+    use_key, new_key = jax.random.split(state.rng_key)
+    idx = jax.random.choice(use_key, nclients, shape=(round(C * nclients),), p=p)
+    reputations = state.reputations
+    reputations = reputations.at[idx].set(
+        jnp.where(taus[idx] > state.t, reputations[idx] + state.delta, reputations[idx] - state.delta)
+    )
+    reputations = jnp.maximum(state.reputations, 1e-8)  # Ensure reputations stay above 0
+    lr = jnp.zeros(nclients)
+    lr = lr.at[idx].set(1 - taus[idx])
+    reputations = reputations.at[idx].set(reputations[idx] / jnp.max(reputations[idx]))
+    lr = lr / jnp.max(lr)
+    lr = jnp.where(lr == 1, 0.99, lr)
+    lr = jnp.log(lr / (1 - lr)) + 0.5
+    lr = jnp.where(jnp.isinf(lr) + lr > 1, 1, lr)
+    lr = jnp.where(lr < 0, 0, lr)
+    return (
+        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * lr).T, axis=0), *all_grads),
+        ContraState(
+            delta=state.delta,
+            t=state.t,
+            reputations=reputations,
+            histories=histories,
+            rng_key=new_key,
+        ),
+    )
+
+
+# TODO: STD-DAGMM
+
+
+class ViceroyState(NamedTuple):
+    round: int
+    omega: float
+    rho: float
+    histories: chex.Array
+    reputations: chex.Array
+
+
+@jax.jit
+def viceroy(all_grads, state):
+    X = jnp.array([jax.flatten_util.ravel_pytree(g)[0] for g in all_grads])
+    reputations = state.reputations
+    current_scale = foolsgold_scale(X)
+    history_scale = foolsgold_scale(state.histories)
+    reputations = jnp.clip(reputations + ((1 - 2 * jnp.abs(history_scale - current_scale)) / 2) * state.rho, 0, 1)
+    histories = jnp.array([state.omega * h + g for h, g in zip(state.histories, X)])
+    lr = (reputations * foolsgold_scale(state.histories)) + ((1 - reputations) * current_scale)
+    return (
+        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * lr).T, axis=0), *all_grads),
+        ViceroyState(
+            round=state.round + 1,
+            omega=state.omega,
+            rho=state.rho,
+            histories=histories,
+            reputations=reputations,
+        )
+    )
+
+
+@jax.jit
+def foolsgold_scale(X):
+    "A modified FoolsGold algorithm for scaling the gradients/histories."
+    nclients = X.shape[0]
+    cs = jax.vmap(
+        lambda x1: jax.vmap(lambda x2: jnp.dot(x1, x2) / (jnp.linalg.norm(x1) * jnp.linalg.norm(x2)))(X)
+    )(X) - jnp.eye(nclients)
+    maxcs = jnp.max(cs, axis=1)
+    # pardoning
+    pardon_idx = jax.vmap(lambda i: jax.vmap(
+        lambda j: (maxcs[i] < maxcs[j]) * (maxcs[i] / maxcs[j]))(jnp.arange(nclients))
+    )(jnp.arange(nclients))
+    cs = jnp.where(pardon_idx > 0, cs * pardon_idx, cs)
+    # Prevent invalid values
+    wv = 1 - (jnp.max(cs, axis=1))
+    wv = jnp.where(wv > 1, 1, wv)
+    wv = jnp.where(wv < 0, 0, wv)
+    wv = wv / jnp.max(wv)  # Rescale to [0, 1]
+    wv = jnp.where(wv == 1, 0.99, wv)
+    wv = jnp.where(wv != 0, (jnp.log(wv / (1 - wv)) + 0.5), wv)  # Logit function
+    wv = jnp.where(jnp.isinf(wv) + wv > 1, 1, wv)
+    wv = jnp.where(wv < 1, 0, wv)
+    wv = jnp.where(jnp.isnan(wv), 0.5, wv)
+    return wv
+
+
 @jax.jit
 def tree_sub(tree_a, tree_b):
     return jax.tree_util.tree_map(lambda a, b: a - b, tree_a, tree_b)
@@ -193,6 +302,28 @@ class Server:
                     histories=jnp.array([
                         jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
                     ])
+                )
+            case "contra":
+                self.aggregate_fn = contra
+                self.aggregate_state = ContraState(
+                    delta=0.1,
+                    t=0.5,
+                    reputations=jnp.ones(len(clients)),
+                    histories=jnp.array([
+                        jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
+                    ]),
+                    rng_key=jax.random.PRNGKey(42)
+                )
+            case "viceroy":
+                self.aggregate_fn = viceroy
+                self.aggregate_state = ViceroyState(
+                    round=1,
+                    omega=(abs(sys.float_info.epsilon))**(1/56),
+                    rho=1 / 5,
+                    histories=jnp.array([
+                        jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
+                    ]),
+                    reputations=jnp.ones(len(clients)),
                 )
             case _:
                 raise NotImplementedError(f"{aggregator} not implemented")
