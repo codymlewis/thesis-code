@@ -1,0 +1,12 @@
+datasets
+numpy
+pandas
+flax
+jax
+einops
+scikit-learn
+jaxopt
+Pillow
+matplotlib
+rarfile
+Jinja2

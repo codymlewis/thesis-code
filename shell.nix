@@ -13,8 +13,11 @@
     virtualenv venv
     source venv/bin/activate
     pip install -r requirements.txt
-    [[ $(lspci | grep 'NVIDIA') ]] && \
+    if [[ $(lspci | grep 'NVIDIA') ]]; then
       pip install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+    else
+      pip install jax
+    fi
     bash
   '';
 }).env

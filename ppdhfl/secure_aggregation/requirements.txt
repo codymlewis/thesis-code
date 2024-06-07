@@ -1,0 +1,8 @@
+datasets
+numpy
+einops
+flax
+optax
+tqdm
+pyseltongue
+pycryptodome
