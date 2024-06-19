@@ -18,6 +18,11 @@
     else
       pip install jax
     fi
+    if [ ! -d smahfl/data/ ]; then
+      cd smahfl/data_processing/
+      python acquire.py
+      cd ../../
+    fi
     bash
   '';
 }).env

@@ -22,3 +22,9 @@ Pygments==2.16.1
 pyseltongue==1.0.2
 rarfile==4.1
 jupyterlab
+grid2op==1.9.6
+lightsim2grid==0.7.5
+numba==0.60.0
+safetensors==0.4.1
+l2rpn-baselines==0.8.0
+stable-baselines3==2.2.1
