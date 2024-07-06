@@ -15,7 +15,8 @@ class LeNet_300_100(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        x = einops.rearrange(x, 'b h w c -> b (h w c)')
+        if len(x.shape) > 2:
+            x = einops.rearrange(x, 'b h w c -> b (h w c)')
         x = nn.Dense(300)(x)
         x = nn.relu(x)
         x = nn.Dense(100)(x)

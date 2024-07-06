@@ -1,6 +1,9 @@
 import argparse
 from typing import Iterable
 import datasets
+import sklearn.datasets as skds
+import sklearn.model_selection as skms
+import sklearn.preprocessing as skp
 import einops
 import numpy as np
 import jax
@@ -55,6 +58,20 @@ def cifar10():
     return data_dict, nclasses
 
 
+def kddcup99():
+    X, Y = skds.fetch_kddcup99(return_X_y=True)
+    X = skp.OrdinalEncoder().fit_transform(X)
+    Y = skp.OrdinalEncoder().fit_transform(Y.reshape(-1, 1)).reshape(-1)
+    X = skp.MinMaxScaler().fit_transform(X)
+    train_X, test_X, train_Y, test_Y = skms.train_test_split(X, Y, test_size=0.2, random_state=23907)
+    nclasses = len(np.unique(Y))
+    data_dict = {
+        "train": {"X": train_X, "Y": train_Y},
+        "test": {"X": test_X, "Y": test_Y},
+    }
+    return data_dict, nclasses
+
+
 def lda(labels: Iterable[int], nclients: int, nclasses: int, rng: np.random.Generator, alpha: float = 0.5):
     r"""
     Latent Dirichlet allocation defined in https://arxiv.org/abs/1909.06335
@@ -90,6 +107,8 @@ if __name__ == "__main__":
             dataset, nclasses = mnist()
         case "cifar10":
             dataset, nclasses = cifar10()
+        case "kddcup99":
+            dataset, nclasses = kddcup99()
         case _:
             raise NotImplementedError(f"{args.dataset} not implemented")
 
