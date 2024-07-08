@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax.training import train_state
+import optax
 import chex
 import einops
 
@@ -200,7 +201,112 @@ def contra(all_grads, state):
     )
 
 
-# TODO: STD-DAGMM
+class STDDAGMM(nn.Module):
+    input_size: int
+
+    @nn.compact
+    def __call__(self, x):
+        enc = nn.Sequential([
+            nn.Dense(60), nn.relu,
+            nn.Dense(30), nn.relu,
+            nn.Dense(10), nn.relu,
+            nn.Dense(1),
+        ])(x)
+        dec = nn.Sequential([
+            nn.Dense(10), nn.tanh,
+            nn.Dense(30), nn.tanh,
+            nn.Dense(60), nn.tanh,
+            nn.Dense(self.input_size),
+        ])(enc)
+        relative_euc_dist = (
+            jnp.linalg.norm(x - dec, ord=2, axis=1) /
+            jnp.clip(jnp.linalg.norm(x, ord=2, axis=1), a_min=1e-10)
+        )
+        cosine_sim = (
+            jnp.einsum('bx,bx->b', x, dec) /
+            jnp.clip(jnp.linalg.norm(x, ord=2, axis=1) * jnp.linalg.norm(dec, ord=2, axis=1), a_min=1e-10)
+        )
+        z = jnp.concatenate([
+            enc,
+            relative_euc_dist.reshape(-1, 1),
+            cosine_sim.reshape(-1, 1),
+            jnp.std(x, 1).reshape(-1, 1),
+        ], axis=1)
+        gamma = nn.Sequential([
+            nn.Dense(10), nn.tanh,
+            nn.Dense(2), nn.softmax
+        ])(z)
+
+        phi, mu, cov = compute_gmm_params(z, gamma)
+        sample_energy, cov_diag = compute_energy(z, phi, mu, cov)
+        return dec, sample_energy, cov_diag
+
+
+def compute_gmm_params(z, gamma):
+    phi = jnp.sum(gamma, 0) / gamma.shape[0]
+    mu = (jnp.einsum('bg,bz->gz', gamma, z).T / jnp.sum(gamma, 0)).T
+    z_mu = jnp.expand_dims(z, 1) - jnp.expand_dims(mu, 0)
+    z_mu_outer = jnp.expand_dims(z_mu, -1) * jnp.expand_dims(z_mu, -2)
+    cov = (jnp.einsum("bn,bnlm->nlm", gamma, z_mu_outer).T / jnp.sum(gamma, 0)).T
+    return phi, mu, cov
+
+
+def compute_energy(z, phi, mu, cov, eps=1e-12):
+    k, D, _ = cov.shape
+    z_mu = jnp.expand_dims(z, 1) - jnp.expand_dims(mu, 0)
+    eps = 1e-12
+
+    def find_cov_inverse(cov_diag, i):
+        cov_k = cov[i] + (jnp.eye(D) * eps)
+        cov_diag = cov_diag + jnp.sum(1 / jnp.diag(cov_k))
+        return cov_diag, jnp.linalg.inv(cov_k)
+
+    cov_diag, cov_inverse = jax.lax.scan(find_cov_inverse, jnp.array(0, jnp.float32), jnp.arange(k))
+
+    def find_det_cov(cov_diag, i):
+        cov_k = cov[i] + (jnp.eye(D) * eps)
+        cov_diag = cov_diag + jnp.sum(1 / jnp.diag(cov_k))
+        return cov_diag, jnp.linalg.det(cov_k * (2 * jnp.pi))
+
+    cov_diag, det_cov = jax.lax.scan(find_det_cov, jnp.array(0, jnp.float32), jnp.arange(k))
+
+    exp_term_tmp = -0.5 * jnp.einsum('bz,bzg->bz', jnp.einsum('bzg,zgh->bz', z_mu, cov_inverse), z_mu)
+    max_val = jnp.max(jnp.maximum(exp_term_tmp, 0), axis=1)[0]  # for stability (logsumexp)
+    exp_term = jnp.exp(jnp.clip(exp_term_tmp - max_val, -50, 50))
+
+    sample_energy = -max_val - jnp.log(jnp.sum(phi * exp_term / (jnp.sqrt(det_cov) + eps), axis=1) + eps)
+    return sample_energy, cov_diag
+
+
+def stddagmm_step(
+    state,
+    X: chex.Array,
+    lambda_energy: float = 0.1,
+    lambda_cov_diag: float = 0.005,
+):
+    def loss_fn(params):
+        dec, sample_energy, cov_diag = state.apply_fn(params, X)
+        recon_error = jnp.mean((X - dec)**2)
+        loss_value = recon_error + lambda_energy * jnp.mean(sample_energy) + lambda_cov_diag * cov_diag
+        return loss_value
+
+    grads = jax.grad(loss_fn)(state.params)
+    state = state.apply_gradients(grads=grads)
+    return state
+
+
+@jax.jit
+def stddagmm_aggregate(all_grads, state):
+    X = jnp.array([jax.flatten_util.ravel_pytree(g)[0] for g in all_grads])
+    state = stddagmm_step(state, X)
+    _, energies, _ = state.apply_fn(state.params, X)
+    std = jnp.std(energies)
+    avg = jnp.mean(energies)
+    mask = jnp.where((energies >= avg - std) * (energies <= avg + std), 1, 0)
+    return (
+        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * mask).T, axis=0), *all_grads),
+        state,
+    )
 
 
 class ViceroyState(NamedTuple):
@@ -325,6 +431,15 @@ class Server:
                         jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
                     ]),
                     reputations=jnp.ones(len(clients)),
+                )
+            case "stddagmm":
+                self.aggregate_fn = stddagmm_aggregate
+                input_size = np.prod(jax.flatten_util.ravel_pytree(state.params)[0].shape)
+                model = STDDAGMM(input_size)
+                self.aggregate_state = train_state.TrainState.create(
+                    apply_fn=model.apply,
+                    params=model.init(jax.random.PRNGKey(8342), jnp.zeros((1, input_size), jnp.float32)),
+                    tx=optax.adamw(0.001, weight_decay=0.0001),
                 )
             case _:
                 raise NotImplementedError(f"{aggregator} not implemented")
