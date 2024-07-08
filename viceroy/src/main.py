@@ -1,5 +1,6 @@
 import argparse
 from typing import Iterable
+import os
 import datasets
 import sklearn.datasets as skds
 import sklearn.model_selection as skms
@@ -90,6 +91,18 @@ def lda(labels: Iterable[int], nclients: int, nclasses: int, rng: np.random.Gene
     return distribution
 
 
+def write_results(results_filename, experiment_config, acc_val, asr_val):
+    experiment_data = experiment_config
+    experiment_data["accuracy"] = acc_val
+    experiment_data["ASR"] = asr_val
+    if not os.path.exists(results_filename):
+        with open(results_filename, 'w') as f:
+            f.write(','.join([str(k) for k in experiment_data.keys()]) + "\n")
+    with open(results_filename, 'a') as f:
+        f.write(','.join([str(v) for v in experiment_data.values()]) + "\n")
+    return f"Results written to {results_filename}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Perform the Viceroy experiments")
     parser.add_argument('-s', '--seed', type=int, default=42, help="Seed for random number generation operations.")
@@ -144,3 +157,6 @@ if __name__ == "__main__":
 
     acc_val = server.test(global_state, dataset['test'])
     print(f"Accuracy: {acc_val:.5%}")
+    asr_val = 0.0
+
+    print(write_results("results.csv", vars(args), acc_val, asr_val))
