@@ -1,4 +1,5 @@
 import argparse
+import functools
 from typing import Iterable
 import os
 import datasets
@@ -11,8 +12,10 @@ import jax
 from flax.training import train_state
 import optax
 from tqdm import trange
+import psutil
 
 import fl
+import adversary
 
 
 def hfdataset_to_dict(hfdataset):
@@ -94,7 +97,7 @@ def lda(labels: Iterable[int], nclients: int, nclasses: int, rng: np.random.Gene
 def write_results(results_filename, experiment_config, acc_val, asr_val):
     experiment_data = experiment_config
     experiment_data["accuracy"] = acc_val
-    experiment_data["ASR"] = asr_val
+    experiment_data["asr"] = asr_val
     if not os.path.exists(results_filename):
         with open(results_filename, 'w') as f:
             f.write(','.join([str(k) for k in experiment_data.keys()]) + "\n")
@@ -112,6 +115,10 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--clients", type=int, default=10, help="Number of clients to train.")
     parser.add_argument("-r", "--rounds", type=int, default=500, help="Number of rounds to train for.")
     parser.add_argument('-lr', '--learning-rate', type=float, default=0.1, help="Learning rate to use for training.")
+    parser.add_argument("--adversary-type", type=str, default="none",
+                        help="Type of adversary to simulate in the system.")
+    parser.add_argument("--percent-adversaries", type=float, default=0.0,
+                        help="Percentage of adversaries to compose the network")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -129,6 +136,35 @@ if __name__ == "__main__":
         model = fl.LeNet5(nclasses)
     else:
         model = fl.LeNet_300_100(nclasses)
+
+    match args.adversary_type:
+        case "labelflipper" | "scaling_labelflipper":
+            label_mapping = {"from": 0, "to": 11 if args.dataset == "kddcup99" else 1}
+            adversary_type = functools.partial(
+                adversary.LabelFlipper,
+                label_mapping=label_mapping,
+            )
+        case "freerider":
+            adversary_type = adversary.FreeRider
+        case _:
+            adversary_type = fl.Client
+
+    match args.adversary_type:
+        case "scaling_labelflipper":
+            network_type = functools.partial(
+                adversary.ScalerNetwork,
+                percent_adversaries=args.percent_adversaries,
+            )
+        case "badmouther" | "goodmouther":
+            network_type = functools.partial(
+                adversary.MoutherNetwork,
+                percent_adversaries=args.percent_adversaries,
+                victim_id=0,
+                attack_type=args.adversary_type,
+            )
+        case _:
+            network_type = fl.Network
+
     global_state = train_state.TrainState.create(
         apply_fn=model.apply,
         params=model.init(jax.random.PRNGKey(args.seed), dataset['train']['X'][:1]),
@@ -143,20 +179,33 @@ if __name__ == "__main__":
     )
     server = fl.Server(
         global_state,
-        [
-            fl.Client({'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]}, seed=args.seed + i)
-            for i, didx in enumerate(data_distribution)
-        ],
+        network_type([
+            (fl.Client if i < round((1 - args.percent_adversaries) * args.clients) else adversary_type)(
+                {'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]}, seed=args.seed + i
+            ) for i, didx in enumerate(data_distribution)
+        ]),
         batch_size=32,
         aggregator=args.aggregator,
     )
 
     for r in (pbar := trange(args.rounds)):
         loss_val, global_state = server.step(global_state)
-        pbar.set_postfix_str(f"LOSS: {loss_val:.5f}")
+        pbar.set_postfix_str("LOSS: {:.5f}, MEM: {:5.2f}%, CPU: {:5.2f}%".format(
+            loss_val,
+            psutil.virtual_memory().percent,
+            psutil.cpu_percent(),
+        ))
 
     acc_val = server.test(global_state, dataset['test'])
     print(f"Accuracy: {acc_val:.5%}")
-    asr_val = 0.0
+
+    match args.adversary_type:
+        case "labelflipper" | "scaling_labelflipper":
+            asr_val = adversary.labelflipper_asr(
+                global_state, dataset['test']["X"], dataset['test']["Y"], label_mapping
+            )
+        case _:
+            asr_val = 0.0
+    print(f"Attack Success Rate: {asr_val:.5%}")
 
     print(write_results("results.csv", vars(args), acc_val, asr_val))

@@ -389,8 +389,8 @@ def accuracy(state, X, Y, batch_size=1000):
 
 
 class Server:
-    def __init__(self, state, clients, batch_size, aggregator="fedavg"):
-        self.clients = clients
+    def __init__(self, state, network, batch_size, aggregator="fedavg"):
+        self.network = network
         self.batch_size = batch_size
         match aggregator:
             case "fedavg":
@@ -445,12 +445,7 @@ class Server:
                 raise NotImplementedError(f"{aggregator} not implemented")
 
     def step(self, state):
-        all_grads, all_losses = [], []
-        for client in self.clients:
-            loss, params = client.step(state, batch_size=self.batch_size)
-            grads = tree_sub(params, state.params)
-            all_grads.append(grads)
-            all_losses.append(loss)
+        all_grads, all_losses = self.network.step(state, batch_size=self.batch_size)
         agg_grads, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         state = state.replace(params=tree_add(state.params, agg_grads))
         return np.mean(all_losses), state
@@ -458,3 +453,18 @@ class Server:
     def test(self, state, test_data):
         acc_val = accuracy(state, test_data['X'], test_data['Y'])
         return acc_val
+
+
+class Network:
+    "The federated learning network layer"
+    def __init__(self, clients):
+        self.clients = clients
+
+    def step(self, state, batch_size):
+        all_grads, all_losses = [], []
+        for client in self.clients:
+            loss, params = client.step(state, batch_size=batch_size)
+            grads = tree_sub(params, state.params)
+            all_grads.append(grads)
+            all_losses.append(loss)
+        return all_grads, all_losses
