@@ -95,8 +95,8 @@ class Client:
 
 
 @jax.jit
-def fedavg(all_grads, _state):
-    return jax.tree_util.tree_map(lambda *x: sum(x) / len(x), *all_grads), _state
+def fedavg(all_grads, unused_state):
+    return jnp.repeat(1 / len(all_grads), len(all_grads)), unused_state
 
 
 @jax.jit
@@ -105,15 +105,15 @@ def median(all_grads, _state):
 
 
 @jax.jit
-def krum(all_grads, _state):
+def krum(all_grads, unused_state):
     n = len(all_grads)
     clip = round(0.3 * n)
     X = jnp.array([jax.flatten_util.ravel_pytree(g)[0] for g in all_grads])
-    unflattener = jax.flatten_util.ravel_pytree(all_grads[0])[1]
     distances = jnp.sum(X**2, axis=1)[:, None] + jnp.sum(X**2, axis=1)[None] - 2 * jnp.dot(X, X.T)
     _, scores = jax.lax.scan(lambda unused, d: (None, jnp.sum(jnp.sort(d)[1:((n - clip) - 1)])), None, distances)
-    idx = jnp.argpartition(scores, n - clip)[:(n - clip)]
-    return unflattener(jnp.mean(X[idx], axis=0)), _state
+    krum_threshold = jnp.partition(scores, n - clip)[n - clip]
+    mask = jnp.where(scores < krum_threshold, 1, 0)
+    return mask, unused_state
 
 
 class FoolsGoldState(NamedTuple):
@@ -144,10 +144,7 @@ def foolsgold(all_grads, state):
     wv = jnp.where(wv != 0, state.kappa * (jnp.log(wv / (1 - wv)) + 0.5), wv)  # Logit function
     wv = jnp.where(jnp.isinf(wv) + wv > 1, 1, wv)
     wv = jnp.where(wv < 1, 0, wv)
-    return (
-        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * wv).T, axis=0), *all_grads),
-        FoolsGoldState(kappa=state.kappa, histories=histories),
-    )
+    return wv, FoolsGoldState(kappa=state.kappa, histories=histories)
 
 
 class ContraState(NamedTuple):
@@ -190,7 +187,7 @@ def contra(all_grads, state):
     lr = jnp.where(jnp.isinf(lr) + lr > 1, 1, lr)
     lr = jnp.where(lr < 0, 0, lr)
     return (
-        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * lr).T, axis=0), *all_grads),
+        lr,
         ContraState(
             delta=state.delta,
             t=state.t,
@@ -303,10 +300,7 @@ def stddagmm_aggregate(all_grads, state):
     std = jnp.std(energies)
     avg = jnp.mean(energies)
     mask = jnp.where((energies >= avg - std) * (energies <= avg + std), 1, 0)
-    return (
-        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * mask).T, axis=0), *all_grads),
-        state,
-    )
+    return mask, state
 
 
 class ViceroyState(NamedTuple):
@@ -327,7 +321,7 @@ def viceroy(all_grads, state):
     histories = jnp.array([state.omega * h + g for h, g in zip(state.histories, X)])
     lr = (reputations * foolsgold_scale(state.histories)) + ((1 - reputations) * current_scale)
     return (
-        jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * lr).T, axis=0), *all_grads),
+        lr,
         ViceroyState(
             round=state.round + 1,
             omega=state.omega,
@@ -392,67 +386,78 @@ class Server:
     def __init__(self, state, network, batch_size, aggregator="fedavg"):
         self.network = network
         self.batch_size = batch_size
-        match aggregator:
-            case "fedavg":
-                self.aggregate_fn = fedavg
-                self.aggregate_state = None
-            case "median":
-                self.aggregate_fn = median
-                self.aggregate_state = None
-            case "krum":
-                self.aggregate_fn = krum
-                self.aggregate_state = None
-            case "foolsgold":
-                self.aggregate_fn = foolsgold
-                self.aggregate_state = FoolsGoldState(
-                    kappa=1.0,
-                    histories=jnp.array([
-                        jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
-                    ])
-                )
-            case "contra":
-                self.aggregate_fn = contra
-                self.aggregate_state = ContraState(
-                    delta=0.1,
-                    t=0.5,
-                    reputations=jnp.ones(len(clients)),
-                    histories=jnp.array([
-                        jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
-                    ]),
-                    rng_key=jax.random.PRNGKey(42)
-                )
-            case "viceroy":
-                self.aggregate_fn = viceroy
-                self.aggregate_state = ViceroyState(
-                    round=1,
-                    omega=(abs(sys.float_info.epsilon))**(1/56),
-                    rho=1 / 5,
-                    histories=jnp.array([
-                        jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in clients
-                    ]),
-                    reputations=jnp.ones(len(clients)),
-                )
-            case "stddagmm":
-                self.aggregate_fn = stddagmm_aggregate
-                input_size = np.prod(jax.flatten_util.ravel_pytree(state.params)[0].shape)
-                model = STDDAGMM(input_size)
-                self.aggregate_state = train_state.TrainState.create(
-                    apply_fn=model.apply,
-                    params=model.init(jax.random.PRNGKey(8342), jnp.zeros((1, input_size), jnp.float32)),
-                    tx=optax.adamw(0.001, weight_decay=0.0001),
-                )
-            case _:
-                raise NotImplementedError(f"{aggregator} not implemented")
+        self.aggregate_fn, self.aggregate_state = get_aggregator(aggregator, state, len(network.clients))
 
     def step(self, state):
         all_grads, all_losses = self.network.step(state, batch_size=self.batch_size)
-        agg_grads, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
+        p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
+        agg_grads = average_trees(all_grads, p)
         state = state.replace(params=tree_add(state.params, agg_grads))
         return np.mean(all_losses), state
 
     def test(self, state, test_data):
         acc_val = accuracy(state, test_data['X'], test_data['Y'])
         return acc_val
+
+
+def get_aggregator(aggregator, state, num_clients):
+    match aggregator:
+        case "fedavg":
+            aggregate_fn = fedavg
+            aggregate_state = None
+        case "median":
+            aggregate_fn = median
+            aggregate_state = None
+        case "krum":
+            aggregate_fn = krum
+            aggregate_state = None
+        case "foolsgold":
+            aggregate_fn = foolsgold
+            aggregate_state = FoolsGoldState(
+                kappa=1.0,
+                histories=jnp.array([
+                    jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in range(num_clients)
+                ])
+            )
+        case "contra":
+            aggregate_fn = contra
+            aggregate_state = ContraState(
+                delta=0.1,
+                t=0.5,
+                reputations=jnp.ones(num_clients),
+                histories=jnp.array([
+                    jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in range(num_clients)
+                ]),
+                rng_key=jax.random.PRNGKey(42)
+            )
+        case "viceroy":
+            aggregate_fn = viceroy
+            aggregate_state = ViceroyState(
+                round=1,
+                omega=(abs(sys.float_info.epsilon))**(1/56),
+                rho=1 / 5,
+                histories=jnp.array([
+                    jnp.zeros_like(jax.flatten_util.ravel_pytree(state.params)[0]) for _ in range(num_clients)
+                ]),
+                reputations=jnp.ones(num_clients),
+            )
+        case "stddagmm":
+            aggregate_fn = stddagmm_aggregate
+            input_size = np.prod(jax.flatten_util.ravel_pytree(state.params)[0].shape)
+            model = STDDAGMM(input_size)
+            aggregate_state = train_state.TrainState.create(
+                apply_fn=model.apply,
+                params=model.init(jax.random.PRNGKey(8342), jnp.zeros((1, input_size), jnp.float32)),
+                tx=optax.adamw(0.001, weight_decay=0.0001),
+            )
+        case _:
+            raise NotImplementedError(f"{aggregator} not implemented")
+    return aggregate_fn, aggregate_state
+
+
+@jax.jit
+def average_trees(trees, weights):
+    return jax.tree_util.tree_map(lambda *x: jnp.sum((jnp.array(x).T * weights).T, axis=0), *trees)
 
 
 class Network:

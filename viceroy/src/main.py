@@ -136,6 +136,11 @@ if __name__ == "__main__":
         model = fl.LeNet5(nclasses)
     else:
         model = fl.LeNet_300_100(nclasses)
+    global_state = train_state.TrainState.create(
+        apply_fn=model.apply,
+        params=model.init(jax.random.PRNGKey(args.seed), dataset['train']['X'][:1]),
+        tx=optax.sgd(args.learning_rate),
+    )
 
     match args.adversary_type:
         case "labelflipper" | "scaling_labelflipper":
@@ -144,13 +149,61 @@ if __name__ == "__main__":
                 adversary.LabelFlipper,
                 label_mapping=label_mapping,
             )
+        case "backdoor" | "scaling_backdoor":
+            match args.dataset:
+                case "mnist":
+                    trigger = np.zeros((28, 28, 1))
+                    trigger[:5, :5, :] = 1
+                case "cifar10":
+                    trigger = np.zeros((32, 32, 3))
+                    trigger[:5, :5, :] = 1
+                case "kddcup99":
+                    trigger = np.zeros((42,))
+                    trigger[:5] = 1
+            backdoor_mapping = {
+                "from": 0,
+                "to": 11 if args.dataset == "kddcup99" else 1,
+                "trigger": trigger,
+            }
+            adversary_type = functools.partial(
+                adversary.Backdoor,
+                backdoor_mapping=backdoor_mapping,
+            )
         case "freerider":
+            adversary_type = adversary.FreeRider
+        case "onoff_labelflipper":
+            label_mapping = {"from": 0, "to": 11 if args.dataset == "kddcup99" else 1}
+            adversary_type = functools.partial(
+                adversary.OnOffLabelFlipper,
+                label_mapping=label_mapping,
+            )
+        case "onoff_backdoor":
+            match args.dataset:
+                case "mnist":
+                    trigger = np.zeros((28, 28, 1))
+                    trigger[:5, :5, :] = 1
+                case "cifar10":
+                    trigger = np.zeros((32, 32, 3))
+                    trigger[:5, :5, :] = 1
+                case "kddcup99":
+                    trigger = np.zeros((42,))
+                    trigger[:5] = 1
+            backdoor_mapping = {
+                "from": 0,
+                "to": 11 if args.dataset == "kddcup99" else 1,
+                "trigger": trigger,
+            }
+            adversary_type = functools.partial(
+                adversary.OnOffBackdoor,
+                backdoor_mapping=backdoor_mapping,
+            )
+        case "onoff_freerider":
             adversary_type = adversary.FreeRider
         case _:
             adversary_type = fl.Client
 
     match args.adversary_type:
-        case "scaling_labelflipper":
+        case "scaling_labelflipper" | "scaling_backdoor":
             network_type = functools.partial(
                 adversary.ScalerNetwork,
                 percent_adversaries=args.percent_adversaries,
@@ -162,14 +215,16 @@ if __name__ == "__main__":
                 victim_id=0,
                 attack_type=args.adversary_type,
             )
+        case "onoff_labelflipper" | "onoff_backdoor" | "onoff_freerider":
+            network_type = functools.partial(
+                adversary.OnOffNetwork,
+                state=global_state,
+                percent_adversaries=args.percent_adversaries,
+                aggregator=args.aggregator,
+            )
         case _:
             network_type = fl.Network
 
-    global_state = train_state.TrainState.create(
-        apply_fn=model.apply,
-        params=model.init(jax.random.PRNGKey(args.seed), dataset['train']['X'][:1]),
-        tx=optax.sgd(args.learning_rate),
-    )
     data_distribution = lda(
         dataset['train']['Y'],
         args.clients,
@@ -200,9 +255,13 @@ if __name__ == "__main__":
     print(f"Accuracy: {acc_val:.5%}")
 
     match args.adversary_type:
-        case "labelflipper" | "scaling_labelflipper":
+        case "labelflipper" | "scaling_labelflipper" | "onoff_labelflipper":
             asr_val = adversary.labelflipper_asr(
                 global_state, dataset['test']["X"], dataset['test']["Y"], label_mapping
+            )
+        case "backdoor" | "scaling_backdoor" | "onoff_backdoor":
+            asr_val = adversary.backdoor_asr(
+                global_state, dataset['test']["X"], dataset['test']["Y"], backdoor_mapping
             )
         case _:
             asr_val = 0.0
