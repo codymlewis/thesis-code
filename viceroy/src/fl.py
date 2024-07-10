@@ -1,5 +1,6 @@
 import sys
 from typing import Tuple, NamedTuple
+import functools
 import numpy as np
 from sklearn import metrics as skm
 import jax
@@ -10,18 +11,22 @@ import optax
 import chex
 import einops
 
+import compressor
+
 
 class LeNet_300_100(nn.Module):
     classes: int = 10
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, activations=False):
         if len(x.shape) > 2:
             x = einops.rearrange(x, 'b h w c -> b (h w c)')
         x = nn.Dense(300)(x)
         x = nn.relu(x)
         x = nn.Dense(100)(x)
         x = nn.relu(x)
+        if activations:
+            return x
         x = nn.Dense(self.classes)(x)
         x = nn.softmax(x)
         return x
@@ -31,7 +36,7 @@ class ConvLeNet_300_100(nn.Module):
     classes: int = 10
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, activations=False):
         x = nn.Conv(64, (11, 11), 4)
         x = nn.relu(x)
         x = nn.max_pool(x, (3, 3), 2, padding="VALID")
@@ -40,6 +45,8 @@ class ConvLeNet_300_100(nn.Module):
         x = nn.relu(x)
         x = nn.Dense(100)(x)
         x = nn.relu(x)
+        if activations:
+            return x
         x = nn.Dense(self.classes)(x)
         x = nn.softmax(x)
         return x
@@ -49,7 +56,7 @@ class LeNet5(nn.Module):
     classes: int = 10
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, activations=False):
         x = nn.Conv(6, (5, 5), padding="VALID")(x)
         x = nn.relu(x)
         x = nn.avg_pool(x, (2, 2), (2, 2))
@@ -61,6 +68,8 @@ class LeNet5(nn.Module):
         x = nn.relu(x)
         x = nn.Dense(84)(x)
         x = nn.relu(x)
+        if activations:
+            return x
         x = nn.Dense(self.classes)(x)
         x = nn.softmax(x)
         return x
@@ -83,16 +92,27 @@ def learner_step(
 
 
 class Client:
-    def __init__(self, data, seed=0):
+    def __init__(self, data, compressor_name="none", seed=0):
         self.data = data
         self.rng = np.random.default_rng(seed)
+        if compressor_name == "fedmax":
+            self.learner_step = compressor.fedmax_learner_step
+        else:
+            self.learner_step = learner_step
+        match compressor_name:
+            case "topk":
+                self.compress = functools.partial(compressor.topk)
+            case _:
+                self.compress = compressor.identity
 
     def step(self, global_state, epochs=1, batch_size=32):
         state = global_state
         for _ in range(epochs):
             idx = self.rng.choice(len(self.data['Y']), batch_size, replace=False)
-            loss, state = learner_step(state, self.data['X'][idx], self.data['Y'][idx])
-        return loss, state.params
+            loss, state = self.learner_step(state, self.data['X'][idx], self.data['Y'][idx])
+        grads = tree_sub(state.params, global_state.params)
+        grads = self.compress(grads)
+        return loss, grads
 
 
 @jax.jit
@@ -384,14 +404,18 @@ def accuracy(state, X, Y, batch_size=1000):
 
 
 class Server:
-    def __init__(self, state, network, epochs, batch_size, aggregator="fedavg"):
+    def __init__(self, state, network, epochs, batch_size, aggregator="fedavg", compressor_name="none"):
         self.network = network
         self.epochs = epochs
         self.batch_size = batch_size
         self.aggregate_fn, self.aggregate_state = get_aggregator(aggregator, state, len(network.clients))
+        match compressor_name:
+            case _:
+                self.decompress = compressor.identity
 
     def step(self, state):
         all_grads, all_losses = self.network.step(state, epochs=self.epochs, batch_size=self.batch_size)
+        all_grads = self.decompress(all_grads)
         p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         agg_grads = average_trees(all_grads, p)
         state = state.replace(params=tree_add(state.params, agg_grads))
@@ -470,8 +494,8 @@ class Network:
     def step(self, state, epochs, batch_size):
         all_grads, all_losses = [], []
         for client in self.clients:
-            loss, params = client.step(state, epochs=epochs, batch_size=batch_size)
-            grads = tree_sub(params, state.params)
+            loss, grads = client.step(state, epochs=epochs, batch_size=batch_size)
+            # grads = tree_sub(params, state.params)
             all_grads.append(grads)
             all_losses.append(loss)
         return all_grads, all_losses

@@ -7,8 +7,8 @@ import fl
 
 
 class LabelFlipper(fl.Client):
-    def __init__(self, data, label_mapping, seed=0):
-        super().__init__(data, seed=seed)
+    def __init__(self, data, compressor_name, label_mapping, seed=0):
+        super().__init__(data, compressor_name, seed=seed)
         from_idx = data["Y"] == label_mapping["from"]
         self.data["Y"][from_idx] = label_mapping["to"]
 
@@ -31,8 +31,8 @@ def labelflipper_asr(state, X, Y, label_mapping, batch_size=1000):
 
 
 class Backdoor(fl.Client):
-    def __init__(self, data, backdoor_mapping, seed=0):
-        super().__init__(data, seed=seed)
+    def __init__(self, data, compressor_name, backdoor_mapping, seed=0):
+        super().__init__(data, compressor_name, seed=seed)
         from_idx = data["Y"] == backdoor_mapping["from"]
         self.data["X"][from_idx] = np.clip(
             self.data["X"][from_idx] + backdoor_mapping["trigger"],
@@ -60,23 +60,22 @@ def backdoor_asr(state, X, Y, backdoor_mapping, batch_size=1000):
 
 
 class FreeRider(fl.Client):
-    def __init__(self, data, seed=0):
-        super().__init__(data, seed)
+    def __init__(self, data, compressor_name, seed=0):
+        super().__init__(data, compressor_name, seed)
         self.prev_params = None
 
     def step(self, global_state, batch_size=32):
         state = global_state
         if self.prev_params is None:
             self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
-        state = delta_freeride(state, global_state.params, self.prev_params)
+        grads = delta_freeride(state, global_state.params, self.prev_params)
         self.prev_params = global_state.params
-        return 0.0, state.params
+        return 0.0, grads
 
 
 @jax.jit
 def delta_freeride(state, current_params, prev_params):
-    grads = jax.tree_map(lambda a, b: a - b, current_params, prev_params)
-    return state.apply_gradients(grads=grads)
+    return jax.tree_map(lambda a, b: a - b, current_params, prev_params)
 
 
 class ScalerNetwork(fl.Network):
@@ -98,16 +97,16 @@ def scale_tree(input_tree, scaling_value):
 
 
 class OnOffLabelFlipper(fl.Client):
-    def __init__(self, data, label_mapping, seed=0):
-        super().__init__(data, seed=seed)
+    def __init__(self, data, compressor_name, label_mapping, seed=0):
+        super().__init__(data, compressor_name, seed=seed)
         self.off_data = {"X": self.data["X"].copy(), "Y": self.data["Y"].copy()}
         from_idx = data["Y"] == label_mapping["from"]
         self.off_data["Y"][from_idx] = label_mapping["to"]
 
 
 class OnOffBackdoor(fl.Client):
-    def __init__(self, data, backdoor_mapping, seed=0):
-        super().__init__(data, seed=seed)
+    def __init__(self, data, compressor_name, backdoor_mapping, seed=0):
+        super().__init__(data, compressor_name, seed=seed)
         self.off_data = {"X": self.data["X"].copy(), "Y": self.data["Y"].copy()}
         from_idx = data["Y"] == backdoor_mapping["from"]
         self.off_data["X"][from_idx] = np.clip(
@@ -119,17 +118,17 @@ class OnOffBackdoor(fl.Client):
 
 
 class OnOffFreeRider(fl.Client):
-    def __init__(self, data, seed=0):
-        super().__init__(data, seed)
+    def __init__(self, data, compressor_name, seed=0):
+        super().__init__(data, compressor_name, seed)
         self.prev_params = None
 
     def off_step(self, global_state, batch_size=32):
         state = global_state
         if self.prev_params is None:
             self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
-        state = delta_freeride(state, global_state.params, self.prev_params)
+        grads = delta_freeride(state, global_state.params, self.prev_params)
         self.prev_params = global_state.params
-        return 0.0, state.params
+        return 0.0, grads
 
 
 class OnOffNetwork(fl.Network):

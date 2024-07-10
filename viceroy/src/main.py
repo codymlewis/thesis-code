@@ -243,7 +243,9 @@ if __name__ == "__main__":
         global_state,
         network_type([
             (fl.Client if i < round((1 - args.percent_adversaries) * args.clients) else adversary_type)(
-                {'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]}, seed=args.seed + i
+                data={'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]},
+                compressor_name=args.compressor,
+                seed=args.seed + i
             ) for i, didx in enumerate(data_distribution)
         ]),
         epochs=args.epochs,

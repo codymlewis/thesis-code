@@ -1,12 +1,19 @@
-from typing import NamedTuple
+from typing import NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
 import chex
 import optax
 import flax.linen as nn
+from flax.training import train_state
 
 
-# ## Autoencoder compression scheme from https://arxiv.org/abs/2108.05670
+# No compression
+
+def identity(x):
+    return x
+
+
+# Autoencoder compression scheme from https://arxiv.org/abs/2108.05670
 # def mseloss(net):
 
 #     @jax.jit
@@ -244,25 +251,42 @@ import flax.linen as nn
 #     return final_grads
 
 
-## FedMax
-def loss(model):
-    """
-    Loss function used for the FedMAX algorithm proposed in https://arxiv.org/abs/2004.03657
-    """
+# FedMax
 
-    @jax.jit
-    def _apply(params, X, y):
-        logits = jnp.clip(model.apply(params, X), 1e-15, 1 - 1e-15)
-        one_hot = jax.nn.one_hot(y, logits.shape[-1])
-        act = jax.nn.log_softmax(jnp.clip(model.apply(params, X, act=True), 1e-15, 1 - 1e-15))
+@jax.jit
+def fedmax_learner_step(
+    state: train_state.TrainState,
+    X: chex.Array,
+    Y: chex.Array,
+) -> Tuple[float, train_state.TrainState]:
+    def loss_fn(params):
+        logits = jnp.clip(state.apply_fn(params, X), 1e-15, 1 - 1e-15)
+        one_hot = jax.nn.one_hot(Y, logits.shape[-1])
+        act = jax.nn.log_softmax(jnp.clip(state.apply_fn(params, X, activations=True), 1e-15, 1 - 1e-15))
         zero_mat = jax.nn.softmax(jnp.zeros(act.shape))
         kld = jnp.mean(zero_mat * (jnp.log(zero_mat) * act))
         return -jnp.mean(jnp.einsum("bl,bl -> b", one_hot, jnp.log(logits))) + jnp.mean(kld)
 
-    return _apply
+    loss, grads = jax.value_and_grad(loss_fn)(state.params)
+    state = state.apply_gradients(grads=grads)
+    return loss, state
 
 
-## FedProx
+# Top k
+
+@jax.jit
+def topk(grads):
+    k = 0.5
+
+    def prune(x):
+        K = round((1 - k) * x.size)
+        return jnp.where(jnp.abs(x) >= jnp.partition(x.reshape(-1), K)[K], x, 0)
+
+    return jax.tree_util.tree_map(prune, grads)
+
+
+# FedProx
+
 def pgd(opt, mu, local_epochs=1):
     """
     Perturbed gradient descent proposed as the mechanism for FedProx in https://arxiv.org/abs/1812.06127
