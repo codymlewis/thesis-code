@@ -1,4 +1,5 @@
 chex==0.1.86
+jax==0.4.30
 flax==0.8.2
 optax==0.2.2
 jaxopt==0.8.3
