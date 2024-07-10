@@ -5,32 +5,6 @@ import jax.numpy as jnp
 
 import fl
 
-# class Client:
-#     def __init__(self, data, seed=0):
-#         self.data = data
-#         self.rng = np.random.default_rng(seed)
-
-#     def step(self, global_state, batch_size=32):
-#         state = global_state
-#         idx = self.rng.choice(len(self.data['Y']), batch_size, replace=False)
-#         loss, state = learner_step(state, self.data['X'][idx], self.data['Y'][idx])
-#         return loss, state.params
-
-
-# class Network:
-#     "The federated learning network layer"
-#     def __init__(self, clients):
-#         self.clients = clients
-
-#     def step(self, state, batch_size):
-#         all_grads, all_losses = [], []
-#         for client in self.clients:
-#             loss, params = client.step(state, batch_size=batch_size)
-#             grads = tree_sub(params, state.params)
-#             all_grads.append(grads)
-#             all_losses.append(loss)
-#         return all_grads, all_losses
-
 
 class LabelFlipper(fl.Client):
     def __init__(self, data, label_mapping, seed=0):
@@ -110,8 +84,8 @@ class ScalerNetwork(fl.Network):
         super().__init__(clients)
         self.percent_adversaries = percent_adversaries
 
-    def step(self, state, batch_size):
-        all_grads, all_losses = super().step(state, batch_size)
+    def step(self, state, epochs, batch_size):
+        all_grads, all_losses = super().step(state, epochs, batch_size)
         num_adversaries = self.percent_adversaries * len(all_grads)
         for i in range(round((1 - self.percent_adversaries) * len(all_grads)), len(all_grads)):
             all_grads[i] = scale_tree(all_grads[i], len(all_grads) / num_adversaries)
@@ -168,18 +142,21 @@ class OnOffNetwork(fl.Network):
         self.beta = beta
         self.gamma = gamma
         self.sharp = aggregator in ["fedavg", "stddagmm", "krum"]
+        # self.timer = 0
 
-    def step(self, state, batch_size):
-        all_grads, all_losses = super().step(state, batch_size)
+    def step(self, state, epochs, batch_size):
+        all_grads, all_losses = super().step(state, epochs, batch_size)
         p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         num_adversaries = round(self.percent_adversaries * len(all_grads))
         avg_adversary_p = p[-num_adversaries:].mean()
+        # self.timer += 1
         upper_bound = self.attacking and (avg_adversary_p < self.beta * self.max_p)
         if self.sharp:
             lower_bound = not self.attacking and (avg_adversary_p > 0.4 * self.max_p)
         else:
             lower_bound = not self.attacking and (avg_adversary_p > self.gamma * self.max_p)
 
+        # if (self.timer % 30) == 0:
         if upper_bound or lower_bound:
             self.attacking = not self.attacking
             for client in self.clients[-num_adversaries:]:
@@ -199,9 +176,9 @@ class MoutherNetwork(fl.Network):
         self.attack_type = attack_type
         self.rng_key = jax.random.PRNGKey(seed)
 
-    def step(self, state, batch_size):
+    def step(self, state, epochs, batch_size):
         noise_loc, noise_scale = 0.0, 1e-3
-        all_grads, all_losses = super().step(state, batch_size)
+        all_grads, all_losses = super().step(state, epochs, batch_size)
         num_adversaries = round(self.percent_adversaries * len(all_grads))
         adv_start_idx = round((1 - self.percent_adversaries) * len(all_grads))
         rng_keys = jax.random.split(self.rng_key, num_adversaries + 1)

@@ -16,6 +16,7 @@ import psutil
 
 import fl
 import adversary
+import compressor
 
 
 def hfdataset_to_dict(hfdataset):
@@ -114,11 +115,14 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--aggregator", type=str, default="fedavg", help="Aggregation function to use.")
     parser.add_argument("-c", "--clients", type=int, default=10, help="Number of clients to train.")
     parser.add_argument("-r", "--rounds", type=int, default=500, help="Number of rounds to train for.")
+    parser.add_argument("-e", "--epochs", type=int, default=1, help="Number of epochs to train for.")
     parser.add_argument('-lr', '--learning-rate', type=float, default=0.1, help="Learning rate to use for training.")
     parser.add_argument("--adversary-type", type=str, default="none",
                         help="Type of adversary to simulate in the system.")
     parser.add_argument("--percent-adversaries", type=float, default=0.0,
                         help="Percentage of adversaries to compose the network")
+    parser.add_argument("--compressor", type=str, default="none",
+                        help="Compression algorithm to use on the gradients")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -136,10 +140,13 @@ if __name__ == "__main__":
         model = fl.LeNet5(nclasses)
     else:
         model = fl.LeNet_300_100(nclasses)
+    opt = optax.sgd(args.learning_rate)
+    if args.compressor == "fedprox":
+        opt = compressor.pgd(opt, 0.00001, local_epochs=args.epochs)
     global_state = train_state.TrainState.create(
         apply_fn=model.apply,
         params=model.init(jax.random.PRNGKey(args.seed), dataset['train']['X'][:1]),
-        tx=optax.sgd(args.learning_rate),
+        tx=opt,
     )
 
     match args.adversary_type:
@@ -239,6 +246,7 @@ if __name__ == "__main__":
                 {'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]}, seed=args.seed + i
             ) for i, didx in enumerate(data_distribution)
         ]),
+        epochs=args.epochs,
         batch_size=32,
         aggregator=args.aggregator,
     )

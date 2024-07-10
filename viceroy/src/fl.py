@@ -87,10 +87,11 @@ class Client:
         self.data = data
         self.rng = np.random.default_rng(seed)
 
-    def step(self, global_state, batch_size=32):
+    def step(self, global_state, epochs=1, batch_size=32):
         state = global_state
-        idx = self.rng.choice(len(self.data['Y']), batch_size, replace=False)
-        loss, state = learner_step(state, self.data['X'][idx], self.data['Y'][idx])
+        for _ in range(epochs):
+            idx = self.rng.choice(len(self.data['Y']), batch_size, replace=False)
+            loss, state = learner_step(state, self.data['X'][idx], self.data['Y'][idx])
         return loss, state.params
 
 
@@ -383,13 +384,14 @@ def accuracy(state, X, Y, batch_size=1000):
 
 
 class Server:
-    def __init__(self, state, network, batch_size, aggregator="fedavg"):
+    def __init__(self, state, network, epochs, batch_size, aggregator="fedavg"):
         self.network = network
+        self.epochs = epochs
         self.batch_size = batch_size
         self.aggregate_fn, self.aggregate_state = get_aggregator(aggregator, state, len(network.clients))
 
     def step(self, state):
-        all_grads, all_losses = self.network.step(state, batch_size=self.batch_size)
+        all_grads, all_losses = self.network.step(state, epochs=self.epochs, batch_size=self.batch_size)
         p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         agg_grads = average_trees(all_grads, p)
         state = state.replace(params=tree_add(state.params, agg_grads))
@@ -465,10 +467,10 @@ class Network:
     def __init__(self, clients):
         self.clients = clients
 
-    def step(self, state, batch_size):
+    def step(self, state, epochs, batch_size):
         all_grads, all_losses = [], []
         for client in self.clients:
-            loss, params = client.step(state, batch_size=batch_size)
+            loss, params = client.step(state, epochs=epochs, batch_size=batch_size)
             grads = tree_sub(params, state.params)
             all_grads.append(grads)
             all_losses.append(loss)
