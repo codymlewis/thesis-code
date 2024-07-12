@@ -70,6 +70,7 @@ class FreeRider(fl.Client):
         if self.prev_params is None:
             self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
         grads = delta_freeride(state, global_state.params, self.prev_params)
+        grads = self.compress(grads)
         self.prev_params = global_state.params
         return 0.0, grads
 
@@ -138,6 +139,7 @@ class OnOffFreeRider(fl.Client):
         if self.prev_params is None:
             self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
         grads = delta_freeride(state, global_state.params, self.prev_params)
+        grads = self.compress(grads)
         self.prev_params = global_state.params
         return 0.0, grads
 

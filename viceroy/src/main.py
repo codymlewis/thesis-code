@@ -15,6 +15,7 @@ from tqdm import trange
 import psutil
 
 import fl
+import neural_network
 import adversary
 import compressor
 
@@ -121,9 +122,9 @@ def get_dataset(dataset_name):
 
 def create_global_model(dataset_name, dataset, nclasses, learning_rate, compressor_name, epochs, seed):
     if dataset_name == "cifar10":
-        model = fl.LeNet5(nclasses)
+        model = neural_network.LeNet5(nclasses)
     else:
-        model = fl.LeNet_300_100(nclasses)
+        model = neural_network.LeNet_300_100(nclasses)
     opt = optax.sgd(learning_rate)
     if compressor_name == "fedprox":
         opt = compressor.pgd(opt, 0.00001, local_epochs=epochs)
