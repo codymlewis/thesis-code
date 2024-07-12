@@ -144,7 +144,7 @@ def get_adversary_class_and_attack(adversary_type_name, dataset_name):
                 label_mapping=attack_mapping,
             )
         case "backdoor" | "scaling_backdoor":
-            match dataset:
+            match dataset_name:
                 case "mnist":
                     trigger = np.zeros((28, 28, 1))
                     trigger[:5, :5, :] = 1
@@ -172,7 +172,7 @@ def get_adversary_class_and_attack(adversary_type_name, dataset_name):
                 label_mapping=attack_mapping,
             )
         case "onoff_backdoor":
-            match dataset:
+            match dataset_name:
                 case "mnist":
                     trigger = np.zeros((28, 28, 1))
                     trigger[:5, :5, :] = 1
