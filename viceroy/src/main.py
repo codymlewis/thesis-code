@@ -205,7 +205,7 @@ if __name__ == "__main__":
                 backdoor_mapping=backdoor_mapping,
             )
         case "onoff_freerider":
-            adversary_type = adversary.FreeRider
+            adversary_type = adversary.OnOffFreeRider
         case _:
             adversary_type = fl.Client
 
@@ -216,10 +216,11 @@ if __name__ == "__main__":
                 percent_adversaries=args.percent_adversaries,
             )
         case "badmouther" | "goodmouther":
+            mouthing_victim = 0
             network_type = functools.partial(
                 adversary.MoutherNetwork,
                 percent_adversaries=args.percent_adversaries,
-                victim_id=0,
+                victim_id=mouthing_victim,
                 attack_type=args.adversary_type,
             )
         case "onoff_labelflipper" | "onoff_backdoor" | "onoff_freerider":
@@ -255,13 +256,37 @@ if __name__ == "__main__":
         compressor_name=args.compressor,
     )
 
+    if any([a in args.adversary_type for a in ["freerider", "mouther"]]):
+        asr_vals = np.zeros(args.rounds, dtype=np.float32)
+        num_adversaries = round(args.percent_adversaries * args.clients)
     for r in (pbar := trange(args.rounds)):
-        loss_val, global_state = server.step(global_state)
+        step_result = server.step(global_state)
+        global_state = step_result.state
         pbar.set_postfix_str("LOSS: {:.5f}, MEM: {:5.2f}%, CPU: {:5.2f}%".format(
-            loss_val,
+            step_result.loss,
             psutil.virtual_memory().percent,
             psutil.cpu_percent(),
         ))
+        if "freerider" in args.adversary_type:
+            asr_vals[r] = adversary.freerider_asr(
+                step_result.p,
+                args.aggregator,
+                args.adversary_type,
+                server.network,
+                num_adversaries,
+            )
+        if args.adversary_type == "goodmouther":
+            asr_vals[r] = adversary.goodmouther_asr(
+                step_result.aggregated_grads,
+                step_result.all_grads,
+                mouthing_victim,
+            )
+        if args.adversary_type == "badmouther":
+            asr_vals[r] = adversary.badmouther_asr(
+                step_result.aggregated_grads,
+                step_result.all_grads,
+                mouthing_victim,
+            )
 
     acc_val = server.test(global_state, dataset['test'])
     print(f"Accuracy: {acc_val:.5%}")
@@ -275,6 +300,8 @@ if __name__ == "__main__":
             asr_val = adversary.backdoor_asr(
                 global_state, dataset['test']["X"], dataset['test']["Y"], backdoor_mapping
             )
+        case "freerider" | "onoff_freerider" | "goodmouther" | "badmouther":
+            asr_val = np.mean(asr_vals)
         case _:
             asr_val = 0.0
     print(f"Attack Success Rate: {asr_val:.5%}")

@@ -1,6 +1,5 @@
 import sys
-from typing import Tuple, NamedTuple
-import functools
+from typing import Tuple, NamedTuple, Iterable
 import numpy as np
 from sklearn import metrics as skm
 import jax
@@ -408,6 +407,14 @@ def accuracy(state, X, Y, batch_size=1000):
     return skm.accuracy_score(jnp.concatenate(Ys), jnp.concatenate(preds))
 
 
+class ServerStepResult(NamedTuple):
+    loss: float
+    state: train_state.TrainState
+    p: chex.Array
+    all_grads: Iterable[chex.ArrayTree]
+    aggregated_grads: chex.ArrayTree
+
+
 class Server:
     def __init__(self, state, network, epochs, batch_size, aggregator="fedavg", compressor_name="none"):
         self.network = network
@@ -426,7 +433,13 @@ class Server:
         p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         agg_grads = average_trees(all_grads, p)
         state = state.replace(params=tree_add(state.params, agg_grads))
-        return np.mean(all_losses), state
+        return ServerStepResult(
+            loss=np.mean(all_losses),
+            state=state,
+            p=p,
+            all_grads=all_grads,
+            aggregated_grads=agg_grads,
+        )
 
     def test(self, state, test_data):
         acc_val = accuracy(state, test_data['X'], test_data['Y'])

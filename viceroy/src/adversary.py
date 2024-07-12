@@ -1,3 +1,4 @@
+import operator
 import numpy as np
 import sklearn.metrics as skm
 import jax
@@ -64,13 +65,23 @@ class FreeRider(fl.Client):
         super().__init__(global_state, data, compressor_name, seed)
         self.prev_params = None
 
-    def step(self, global_state, batch_size=32):
+    def step(self, global_state, epochs=1, batch_size=32):
         state = global_state
         if self.prev_params is None:
             self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
         grads = delta_freeride(state, global_state.params, self.prev_params)
         self.prev_params = global_state.params
         return 0.0, grads
+
+
+def freerider_asr(p, aggregator, adversary_type, network, num_adversaries):
+    if aggregator in ["fedavg", "median"]:
+        asr_val = np.mean(p[-num_adversaries:]) * np.sum(p > 0)
+    else:
+        asr_val = np.mean(p[-num_adversaries:])
+    if "onoff" in adversary_type:
+        asr_val = asr_val * network.attacking
+    return asr_val
 
 
 @jax.jit
@@ -122,7 +133,7 @@ class OnOffFreeRider(fl.Client):
         super().__init__(global_state, data, compressor_name, seed)
         self.prev_params = None
 
-    def off_step(self, global_state, batch_size=32):
+    def off_step(self, global_state, epochs=1, batch_size=32):
         state = global_state
         if self.prev_params is None:
             self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
@@ -200,3 +211,23 @@ class MoutherNetwork(fl.Network):
 @jax.jit
 def add_normal_tree(grad, loc, scale, rng_key):
     return jax.tree_map(lambda x: x + (jax.random.normal(rng_key, x.shape) + loc) * scale, grad)
+
+
+def badmouther_asr(aggregated_grads, all_grads, victim_id):
+    victim_distance = euclidean_distance_trees(all_grads[victim_id], aggregated_grads)
+    max_distance = max(euclidean_distance_trees(g, aggregated_grads) for g in all_grads)
+    return victim_distance / max_distance
+
+
+def goodmouther_asr(aggregated_grads, all_grads, victim_id):
+    victim_distance = euclidean_distance_trees(all_grads[victim_id], aggregated_grads)
+    min_distance = min(euclidean_distance_trees(g, aggregated_grads) for g in all_grads)
+    return min_distance / victim_distance
+
+
+@jax.jit
+def euclidean_distance_trees(tree_a, tree_b):
+    return jnp.sqrt(jax.tree.reduce(
+        operator.add,
+        jax.tree.map(lambda a, b: jnp.sum((a - b)**2), tree_a, tree_b)
+    ))
