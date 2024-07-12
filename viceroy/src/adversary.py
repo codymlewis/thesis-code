@@ -145,12 +145,28 @@ class OnOffFreeRider(fl.Client):
 
 
 class OnOffNetwork(fl.Network):
-    def __init__(self, clients, state, percent_adversaries, aggregator, beta=1.0, gamma=0.85):
+    def __init__(
+        self,
+        clients,
+        state,
+        percent_adversaries,
+        aggregator,
+        start_on=False,
+        beta=1.0,
+        gamma=0.85,
+    ):
         super().__init__(clients)
         self.percent_adversaries = percent_adversaries
         self.aggregate_fn, self.aggregate_state = fl.get_aggregator(aggregator, state, len(clients))
         self.max_p = 0.1 if aggregator in ["fedavg", "stddagmm"] else 1.0
-        self.attacking = False
+        self.attacking = start_on
+        if start_on:
+            num_adversaries = round(self.percent_adversaries * len(clients))
+            for client in self.clients[-num_adversaries:]:
+                if isinstance(client, OnOffFreeRider):
+                    client.step, client.off_step = client.off_step, client.step
+                else:
+                    client.data, client.off_data = client.off_data, client.data
         self.beta = beta
         self.gamma = gamma
         self.sharp = aggregator in ["fedavg", "stddagmm", "krum"]
@@ -162,11 +178,11 @@ class OnOffNetwork(fl.Network):
         num_adversaries = round(self.percent_adversaries * len(all_grads))
         avg_adversary_p = p[-num_adversaries:].mean()
         # self.timer += 1
-        upper_bound = self.attacking and (avg_adversary_p < self.beta * self.max_p)
+        upper_bound = self.attacking and (avg_adversary_p > self.beta * self.max_p)
         if self.sharp:
-            lower_bound = not self.attacking and (avg_adversary_p > 0.4 * self.max_p)
+            lower_bound = not self.attacking and (avg_adversary_p < 0.4 * self.max_p)
         else:
-            lower_bound = not self.attacking and (avg_adversary_p > self.gamma * self.max_p)
+            lower_bound = not self.attacking and (avg_adversary_p < self.gamma * self.max_p)
 
         # if (self.timer % 30) == 0:
         if upper_bound or lower_bound:

@@ -108,6 +108,23 @@ def write_results(results_filename, experiment_config, acc_val, asr_val):
     return f"Results written to {results_filename}"
 
 
+def write_full_performance(results_filename, accuracy_vals, asr_vals, toggle_states):
+    with open(results_filename, 'w') as f:
+        f.write("accuracy,asr,toggle_state\n")
+        for acc, asr, toggle in zip(accuracy_vals, asr_vals, toggle_states):
+            f.write(f"{acc},{asr},{toggle}\n")
+    return f"Full performance results written to {results_filename}"
+
+
+def write_influence(results_filename, start_on, avg_influence):
+    if not os.path.exists(results_filename):
+        with open(results_filename, 'w') as f:
+            f.write("start_on,p\n")
+    with open(results_filename, 'a') as f:
+        f.write(f"{start_on},{avg_influence}\n")
+    return f"Influence results written to {results_filename}"
+
+
 def get_dataset(dataset_name):
     match dataset_name:
         case "mnist":
@@ -199,7 +216,14 @@ def get_adversary_class_and_attack(adversary_type_name, dataset_name):
     return adversary_type, attack_mapping
 
 
-def get_network_type(aggregator_name, adversary_type_name, percent_adversaries, global_state, attack_mapping):
+def get_network_type(
+    aggregator_name,
+    adversary_type_name,
+    percent_adversaries,
+    global_state,
+    attack_mapping,
+    start_on,
+):
     match adversary_type_name:
         case "scaling_labelflipper" | "scaling_backdoor":
             network_type = functools.partial(
@@ -220,6 +244,7 @@ def get_network_type(aggregator_name, adversary_type_name, percent_adversaries, 
                 state=global_state,
                 percent_adversaries=percent_adversaries,
                 aggregator=aggregator_name,
+                start_on=start_on,
             )
         case _:
             network_type = fl.Network
@@ -242,6 +267,12 @@ if __name__ == "__main__":
                         help="Percentage of adversaries to compose the network")
     parser.add_argument("--compressor", type=str, default="none",
                         help="Compression algorithm to use on the gradients")
+    parser.add_argument("--save-full-performance", action="store_true",
+                        help="Whether to save the global model performance at every round.")
+    parser.add_argument("--start-on", action="store_true",
+                        help="Whether to start an on-off attack in the on state.")
+    parser.add_argument("--save-influence", action="store_true",
+                        help="Save the average influence of adversaries at the final round.")
     args = parser.parse_args()
     print(f"Running experiment with config: {vars(args)}")
 
@@ -266,6 +297,7 @@ if __name__ == "__main__":
         args.percent_adversaries,
         global_state,
         attack_mapping,
+        args.start_on,
     )
 
     data_distribution = lda(
@@ -294,6 +326,29 @@ if __name__ == "__main__":
     if any([a in args.adversary_type for a in ["freerider", "mouther"]]):
         asr_vals = np.zeros(args.rounds, dtype=np.float32)
         num_adversaries = round(args.percent_adversaries * args.clients)
+    if args.save_full_performance:
+        accuracy_vals = np.zeros(args.rounds + 1, dtype=np.float32)
+        asr_vals = np.zeros(args.rounds + 1, dtype=np.float32)
+        toggle_state = np.repeat(True, args.rounds + 1)
+        accuracy_vals[0] = server.test(global_state, dataset['test'])
+        if "labelflipper" in args.adversary_type:
+            asr_vals[0] = adversary.labelflipper_asr(
+                global_state,
+                dataset['test']["X"],
+                dataset['test']["Y"],
+                attack_mapping,
+            )
+        elif "backdoor" in args.adversary_type:
+            asr_vals[0] = adversary.backdoor_asr(
+                global_state,
+                dataset['test']["X"],
+                dataset['test']["Y"],
+                attack_mapping,
+            )
+        if "onoff" in args.adversary_type:
+            toggle_state[0] = server.network.attacking
+        # Note: this is missing freerider and mouthing attacks, but they don't get used anyway
+
     for r in (pbar := trange(args.rounds)):
         step_result = server.step(global_state)
         global_state = step_result.state
@@ -302,6 +357,25 @@ if __name__ == "__main__":
             psutil.virtual_memory().percent,
             psutil.cpu_percent(),
         ))
+
+        if args.save_full_performance:
+            accuracy_vals[r + 1] = server.test(global_state, dataset['test'])
+            if "labelflipper" in args.adversary_type:
+                asr_vals[r + 1] = adversary.labelflipper_asr(
+                    global_state,
+                    dataset['test']["X"],
+                    dataset['test']["Y"],
+                    attack_mapping,
+                )
+            elif "backdoor" in args.adversary_type:
+                asr_vals[r + 1] = adversary.backdoor_asr(
+                    global_state,
+                    dataset['test']["X"],
+                    dataset['test']["Y"],
+                    attack_mapping,
+                )
+            if "onoff" in args.adversary_type:
+                toggle_state[r + 1] = server.network.attacking
         if "freerider" in args.adversary_type:
             asr_vals[r] = adversary.freerider_asr(
                 step_result.p,
@@ -341,4 +415,19 @@ if __name__ == "__main__":
             asr_val = 0.0
     print(f"Attack Success Rate: {asr_val:.5%}")
 
-    print(write_results("results.csv", vars(args), acc_val, asr_val))
+    os.makedirs("results/", exist_ok=True)
+    print(write_results("results/main.csv", vars(args), acc_val, asr_val))
+
+    if args.save_full_performance:
+        print(write_full_performance(
+            "results/performance.csv",
+            accuracy_vals,
+            asr_vals,
+            toggle_state,
+        ))
+    if args.save_influence:
+        print(write_influence(
+            "results/influence.csv",
+            args.start_on,
+            step_result.p[-num_adversaries:].mean(),
+        ))
