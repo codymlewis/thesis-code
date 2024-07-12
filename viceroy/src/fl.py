@@ -92,7 +92,7 @@ def learner_step(
 
 
 class Client:
-    def __init__(self, data, compressor_name="none", seed=0):
+    def __init__(self, global_state, data, compressor_name="none", seed=0):
         self.data = data
         self.rng = np.random.default_rng(seed)
         if compressor_name == "fedmax":
@@ -101,7 +101,12 @@ class Client:
             self.learner_step = learner_step
         match compressor_name:
             case "topk":
-                self.compress = functools.partial(compressor.topk)
+                self.compress = compressor.topk
+            case "autoencoder":
+                self.compression_handler = compressor.AutoEncoderHandler(global_state.params)
+                self.compress = self.compression_handler.compress
+            case "fedzip":
+                self.compress = compressor.fedzip_compress
             case _:
                 self.compress = compressor.identity
 
@@ -410,12 +415,14 @@ class Server:
         self.batch_size = batch_size
         self.aggregate_fn, self.aggregate_state = get_aggregator(aggregator, state, len(network.clients))
         match compressor_name:
+            case "autoencoder":
+                self.decompress = compressor.autoencoder_decompress
             case _:
-                self.decompress = compressor.identity
+                self.decompress = compressor.server_identity
 
     def step(self, state):
         all_grads, all_losses = self.network.step(state, epochs=self.epochs, batch_size=self.batch_size)
-        all_grads = self.decompress(all_grads)
+        all_grads = self.decompress(self.network.clients, all_grads)
         p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         agg_grads = average_trees(all_grads, p)
         state = state.replace(params=tree_add(state.params, agg_grads))
@@ -495,7 +502,6 @@ class Network:
         all_grads, all_losses = [], []
         for client in self.clients:
             loss, grads = client.step(state, epochs=epochs, batch_size=batch_size)
-            # grads = tree_sub(params, state.params)
             all_grads.append(grads)
             all_losses.append(loss)
         return all_grads, all_losses

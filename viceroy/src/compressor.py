@@ -1,4 +1,5 @@
-from typing import NamedTuple, Tuple
+from typing import Callable, Dict, NamedTuple, Tuple
+import numpy as np
 import jax
 import jax.numpy as jnp
 import chex
@@ -9,246 +10,169 @@ from flax.training import train_state
 
 # No compression
 
-def identity(x):
-    return x
+def identity(grads):
+    return grads
+
+
+def server_identity(clients, all_grads):
+    return all_grads
 
 
 # Autoencoder compression scheme from https://arxiv.org/abs/2108.05670
-# def mseloss(net):
+@jax.jit
+def autoencoder_learner_step(
+    state: train_state.TrainState,
+    X: chex.Array,
+) -> Tuple[float, train_state.TrainState]:
+    def loss_fn(params):
+        Z = state.apply_fn(params, X)
+        return jnp.mean(0.5 * (X - Z)**2)
 
-#     @jax.jit
-#     def _apply(params, x):
-#         z = net.apply(params, x)
-#         return jnp.mean(0.5 * (x - z)**2)
-
-#     return _apply
-
-
-# def _update(opt, loss):
-
-#     @jax.jit
-#     def _apply(params, opt_state, x):
-#         grads = jax.grad(loss)(params, x)
-#         updates, opt_state = opt.update(grads, opt_state)
-#         params = optax.apply_updates(params, updates)
-#         return params, opt_state
-
-#     return _apply
-
-# class AutoEncoder(nn.Module):
-#     input_len: int
-
-#     def setup(self):
-#         self.encoder = nn.Sequential([
-#             nn.Dense(64), nn.relu,
-#             nn.Dense(32), nn.relu,
-#             nn.Dense(16), nn.relu,
-#         ])
-#         self.decoder = nn.Sequential([
-#             nn.Dense(16), nn.relu,
-#             nn.Dense(32), nn.relu,
-#             nn.Dense(64), nn.relu,
-#             nn.Dense(self.input_len), nn.sigmoid,
-#         ])
-
-#     def __call__(self, x):
-#         return self.decode(self.encode(x))
-
-#     def encode(self, x):
-#         return self.encoder(x)
-
-#     def decode(self, x):
-#         return self.decoder(x)
-
-# # Autoencoder compression
+    grads = jax.grad(loss_fn)(state.params)
+    state = state.apply_gradients(grads=grads)
+    return state
 
 
-# class Coder:
-#     """Store the per-endpoint autoencoders and associated variables."""
+class AutoEncoder(nn.Module):
+    input_size: int
 
-#     def __init__(self, gm_params, num_clients):
-#         """
-#         Construct the Coder.
-#         Arguments:
-#         - gm_params: the parameters of the global model
-#         - num_clients: the number of clients connected to the associated controller
-#         """
-#         gm_params = jax.flatten_util.ravel_pytree(gm_params)[0]
-#         param_size = len(gm_params)
-#         model = AutoEncoder(param_size)
-#         self.model = model
-#         loss = mseloss(model)
-#         opt = optax.adam(1e-3)
-#         self.updater = _update(opt, loss)
-#         params = model.init(jax.random.PRNGKey(0), gm_params)
-#         self.params = [params for _ in range(num_clients)]
-#         self.opt_states = [opt.init(params) for _ in range(num_clients)]
-#         self.datas = [[] for _ in range(num_clients)]
-#         self.num_clients = num_clients
+    def setup(self):
+        self.encoder = nn.Sequential([
+            nn.Dense(64), nn.relu,
+            nn.Dense(32), nn.relu,
+            nn.Dense(16), nn.relu,
+        ])
+        self.decoder = nn.Sequential([
+            nn.Dense(16), nn.relu,
+            nn.Dense(32), nn.relu,
+            nn.Dense(64), nn.relu,
+            nn.Dense(self.input_size), nn.sigmoid,
+        ])
 
-#     def encode(self, grad, i):
-#         """Encode the updates of the client i."""
-#         return self.model.apply(self.params[i], grad, method=self.model.encode)
+    def __call__(self, x):
+        return self.decode(self.encode(x))
 
-#     def decode(self, all_grads):
-#         """Decode the updates of the clients."""
-#         return jnp.array([
-#             self.model.apply(self.params[i], grad, method=self.model.decode)
-#             for i, grad in enumerate(all_grads)
-#         ])
+    def encode(self, x):
+        return self.encoder(x)
 
-#     def add_data(self, grad, i):
-#         """Add the updates of the client i to the ith dataset."""
-#         self.datas[i].append(grad)
-
-#     def update(self, i):
-#         """Update the ith client's autoencoder."""
-#         grads = jnp.array(self.datas[i])
-#         self.params[i], self.opt_states[i] = self.updater(self.params[i], self.opt_states[i], grads)
-#         self.datas[i] = []
+    def decode(self, x):
+        return self.decoder(x)
 
 
-# class Encode:
-#     """Encoding update transform."""
+class AutoEncoderHandler:
+    def __init__(self, model_params):
+        flat_model_params, self.unflattener = jax.flatten_util.ravel_pytree(model_params)
+        self.ae_model = AutoEncoder(len(flat_model_params))
+        self.data = np.zeros((32, len(flat_model_params)))
+        self.data_idx = 0
+        self.ae_state = train_state.TrainState.create(
+            apply_fn=self.ae_model.apply,
+            params=self.ae_model.init(jax.random.PRNGKey(0), self.data),
+            tx=optax.adam(1e-3),
+        )
 
-#     def __init__(self, coder):
-#         """
-#         Construct the encoder.
-        
-#         Arguments:
-#         - coder: the autoencoders used for compression
-#         """
-#         self.coder = coder
+    def compress(self, grads):
+        flat_grads = jax.flatten_util.ravel_pytree(grads)[0]
+        self.data[self.data_idx] = flat_grads
+        self.data_idx = (self.data_idx + 1) % self.data.shape[0]
+        self.ae_state = autoencoder_learner_step(self.ae_state, self.data)
+        return self.ae_state.apply_fn(
+            self.ae_state.params,
+            jnp.array([flat_grads,]),
+            method=AutoEncoder.encode,
+        )[0]
 
-#     def __call__(self, all_grads):
-#         encoded_grads = []
-#         for i, g in enumerate(all_grads):
-#             self.coder.add_data(g, i)
-#             self.coder.update(i)
-#             encoded_grads.append(self.coder.encode(g, i))
-#         return encoded_grads
-
-
-# class Decode:
-#     """Decoding update transform."""
-
-#     def __init__(self, params, coder):
-#         """
-#         Construct the decoder.
-        
-#         Arguments:
-#         - params: the parameters of the global model, used for structure information
-#         - coder: the autoencoders used for decompression
-#         """
-#         self.coder = coder
-
-#     def __call__(self, all_grads):
-#         return self.coder.decode(all_grads)
+    def decompress(self, grads):
+        return self.unflattener(self.ae_state.apply_fn(
+            self.ae_state.params,
+            grads,
+            method=AutoEncoder.decode,
+        ))
 
 
-
-# ## FedZip compression scheme from https://arxiv.org/abs/2102.01593
-
-# # Client-side FedZip functionality
-
-
-# def encode(all_grads, compress=False):
-#     """Compress all of the updates, performs a lossy-compression then if compress is True, a lossless compression encoding."""
-#     return [_encode(g, compress=compress) for g in all_grads]
+def autoencoder_decompress(clients, all_grads):
+    decompressed_all_grads = []
+    for client, grads in zip(clients, all_grads):
+        decompressed_all_grads.append(
+            client.compression_handler.decompress(grads)
+        )
+    return decompressed_all_grads
 
 
-# def _encode(grads, compress):
-#     sparse_grads = _top_z(0.3, np.array(grads))
-#     quantized_grads = _k_means(sparse_grads)
-#     if compress:
-#         encoded_grads = []
-#         codings = []
-#         for g in quantized_grads:
-#             e = _encoding(g)
-#             encoded_grads.append(e[0])
-#             codings.append(e[1])
-#         return encoded_grads, codings
-#     return quantized_grads
+# FedZip compression scheme from https://arxiv.org/abs/2102.01593
+# Note: this skips the lossless compression to save on computations, since it has no impact here
 
-# def _top_z(z, grads):
-#     z_index = np.ceil(z * grads.shape[0]).astype(np.int32)
-#     grads[np.argpartition(abs(grads), -z_index)[:-z_index]] = 0
-#     return grads
+def fedzip_compress(grads):
+    sparse_grads = topk(grads)
+    quantised_grads = kmeans(sparse_grads)
+    return quantised_grads
 
 
-# def _k_means(grads):
-#     X = np.array(grads).reshape(-1, 1)
-#     model = cluster.KMeans(init='random', n_clusters=3 if len(X) >= 3 else len(X), max_iter=4, n_init=1, random_state=0)
-#     model.fit(X)
-#     labels = model.predict(grads.reshape((-1, 1)))
-#     centroids = model.cluster_centers_
-#     for i, c in enumerate(centroids):
-#         grads[labels == i] = c[0]
-#     return grads
+def plusplus_init(samples: chex.Array, k: int = 8, seed: int = 0) -> Dict[str, chex.Array]:
+    "K-Means++ initialisation algorithm from https://dl.acm.org/doi/10.5555/1283383.1283494"
+    rngkeys = jax.random.split(jax.random.PRNGKey(seed), k)
+    num_samples = samples.shape[0]
+    centroid_idx = jax.random.choice(rngkeys[0], jnp.arange(num_samples))
+    centroids = jnp.concatenate(
+        (jnp.expand_dims(samples[centroid_idx], axis=0), jnp.full((k - 1,) + samples.shape[1:], jnp.inf))
+    )
+
+    def find_centroid(centroids, i):
+        dists = jax.vmap(lambda s: jax.vmap(lambda c: jnp.linalg.norm(c - s))(centroids))(samples)
+        weights = jnp.min(dists, axis=1)
+        centroid_idx = jax.random.choice(rngkeys[i], jnp.arange(num_samples), p=weights**2)
+        centroid = samples[centroid_idx]
+        centroids = jax.lax.dynamic_update_index_in_dim(centroids, centroid, i, axis=0)
+        return centroids, centroid
+
+    _, centroids = jax.lax.scan(find_centroid, centroids, jnp.arange(1, k))
+
+    return {"centroids": centroids}
 
 
-# def _encoding(grads):
-#     centroids = jnp.unique(grads).tolist()
-#     probs = []
-#     for c in centroids:
-#         probs.append(((grads == c).sum() / len(grads)).item())
-#     return _huffman(grads, centroids, probs)
+def lloyds(
+        params: Dict[str, chex.Array], samples: chex.Array, num_iterations: int = 300
+) -> Tuple[chex.Array, Dict[str, chex.Array]]:
+    "Lloyd's algorithm for cluster finding from https://ieeexplore.ieee.org/document/1056489"
+    def iteration(centroids, i):
+        dists = jax.vmap(lambda s: jax.vmap(lambda c: jnp.linalg.norm(c - s))(centroids))(samples)
+        clusters = jnp.argmin(dists, axis=1)
+
+        def find_centroids(unused, cluster):
+            cluster_vals = jnp.where(
+                jnp.tile(clusters == cluster, samples.shape[-1:0:-1] + (1,)).T,
+                samples,
+                jnp.zeros_like(samples, dtype=samples.dtype),
+            )
+            cluster_size = jnp.maximum(1, jnp.sum(clusters == cluster))
+            return unused, jnp.sum(cluster_vals, axis=0) / cluster_size
+
+        _, new_centroids = jax.lax.scan(find_centroids, None, jnp.arange(centroids.shape[0]))
+        return new_centroids, jnp.linalg.norm(new_centroids - centroids)
+
+    centroids, losses = jax.lax.scan(iteration, params['centroids'], jnp.arange(num_iterations))
+    return losses, {"centroids": centroids}
 
 
-# def _huffman(grads, centroids, probs):
-#     groups = [(p, i) for i, p in enumerate(probs)]
-#     if len(centroids) > 1:
-#         while len(groups) > 1:
-#             groups.sort(key=lambda x: x[0])
-#             a, b = groups[0:2]
-#             del groups[0:2]
-#             groups.append((a[0] + b[0], [a[1], b[1]]))
-#         groups[0][1].sort(key=lambda x: isinstance(x, list))
-#         coding = {centroids[k]: v for (k, v) in _traverse_tree(groups[0][1])}
-#     else:
-#         coding = {centroids[0]: 0b0}
-#     result = jnp.zeros(grads.shape, dtype=jnp.int8)
-#     for c in centroids:
-#         result = jnp.where(grads == c, coding[c], result)
-#     return result, {v: k for k, v in coding.items()}
+def kmeans_fit_transform(
+    samples: chex.Array,
+    k: int = 3,
+    num_iterations: int = 300,
+    seed: int = 0
+) -> Dict[str, chex.Array]:
+    params = plusplus_init(samples, k, seed)
+    _, params = lloyds(params, samples, num_iterations)
+    dists = jax.vmap(lambda s: jax.vmap(lambda c: jnp.linalg.norm(c - s))(params["centroids"]))(samples)
+    predictions = params["centroids"][jnp.argmin(dists, axis=1)]
+    return predictions
 
 
-# def _traverse_tree(root, line=0b0):
-#     if isinstance(root, list):
-#         return _traverse_tree(root[0], line << 1) + _traverse_tree(root[1], (line << 1) + 0b1)
-#     return [(root, line)]
-
-
-# # server-side FedZip functionality
-
-
-# class Decode:
-#     """Update transformation that decodes the input updates."""
-
-#     def __init__(self, params, compress=False):
-#         """
-#         Construct the encoder.
-#         Arguments:
-#         - params: the parameters of the model, used for structure information
-#         - compress: whether to perform lossless decompression step
-#         """
-#         self.params = params
-#         self.compress = compress
-
-#     def __call__(self, all_grads):
-#         """Get all updates and decode each one."""
-#         if self.compress:
-#             return [_huffman_decode(self.params, g, e) for (g, e) in all_grads]
-#         return all_grads
-
-
-# @jax.jit
-# def _huffman_decode(params, grads, encodings):
-#     final_grads = [jnp.zeros(p.shape, dtype=jnp.float32) for p in flat_params]
-#     for i, p in enumerate(flat_params):
-#         for k, v in encodings[i].items():
-#             final_grads[i] = jnp.where(grads[i].reshape(p.shape) == k, v, final_grads[i])
-#     return final_grads
+@jax.jit
+def kmeans(grads, k=3, num_iterations=5):
+    return jax.tree_map(
+        lambda g: kmeans_fit_transform(g.reshape(-1), k=k, num_iterations=num_iterations).reshape(g.shape),
+        grads,
+    )
 
 
 # FedMax

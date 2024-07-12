@@ -243,6 +243,7 @@ if __name__ == "__main__":
         global_state,
         network_type([
             (fl.Client if i < round((1 - args.percent_adversaries) * args.clients) else adversary_type)(
+                global_state=global_state,
                 data={'X': dataset["train"]['X'][didx], 'Y': dataset['train']['Y'][didx]},
                 compressor_name=args.compressor,
                 seed=args.seed + i
@@ -251,6 +252,7 @@ if __name__ == "__main__":
         epochs=args.epochs,
         batch_size=32,
         aggregator=args.aggregator,
+        compressor_name=args.compressor,
     )
 
     for r in (pbar := trange(args.rounds)):
