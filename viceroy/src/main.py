@@ -161,7 +161,7 @@ def get_adversary_class_and_attack(adversary_type_name, dataset_name):
             }
             adversary_type = functools.partial(
                 adversary.Backdoor,
-                backdoor_mapping=backdoor_mapping,
+                backdoor_mapping=attack_mapping,
             )
         case "freerider":
             adversary_type = adversary.FreeRider
