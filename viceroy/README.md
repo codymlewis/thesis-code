@@ -1,6 +1,6 @@
 # Viceroy
 
-See https://github.com/codymlewis/viceroy for the original commit history.
+See https://github.com/codymlewis/viceroy for the original commit history. This folder contains a rewrite of the original code, with better optimisation and using the flax library instead of haiku.
 
 ## Abstract
 

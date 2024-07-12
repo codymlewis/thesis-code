@@ -75,7 +75,7 @@ class FreeRider(fl.Client):
 
 
 def freerider_asr(p, aggregator, adversary_type, network, num_adversaries):
-    if aggregator in ["fedavg", "median"]:
+    if aggregator in ["fedavg"]:
         asr_val = np.mean(p[-num_adversaries:]) * np.sum(p > 0)
     else:
         asr_val = np.mean(p[-num_adversaries:])

@@ -125,8 +125,14 @@ def fedavg(all_grads, unused_state):
 
 
 @jax.jit
-def median(all_grads, _state):
-    return jax.tree_util.tree_map(lambda *x: jnp.median(jnp.array(x), axis=0), *all_grads), _state
+def median(all_grads):
+    "Median aggregation algorithm with some added complexity for metric compatibility"
+    agg_grads = jax.tree.map(lambda *x: jnp.median(jnp.array(x), axis=0), *all_grads)
+    G = jnp.array([jax.flatten_util.ravel_pytree(g)[0] for g in all_grads])
+    flat_agg_grads = jax.flatten_util.ravel_pytree(agg_grads)[0]
+    all_chosen = jnp.where(jnp.abs(G - flat_agg_grads) < 1e-15, 1, 0)
+    p = jnp.sum(all_chosen, axis=1) / all_chosen.shape[1]
+    return p, agg_grads
 
 
 @jax.jit
@@ -421,6 +427,7 @@ class Server:
         self.epochs = epochs
         self.batch_size = batch_size
         self.aggregate_fn, self.aggregate_state = get_aggregator(aggregator, state, len(network.clients))
+        self.aggregator = aggregator
         match compressor_name:
             case "autoencoder":
                 self.decompress = compressor.autoencoder_decompress
@@ -430,8 +437,11 @@ class Server:
     def step(self, state):
         all_grads, all_losses = self.network.step(state, epochs=self.epochs, batch_size=self.batch_size)
         all_grads = self.decompress(self.network.clients, all_grads)
-        p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
-        agg_grads = average_trees(all_grads, p)
+        if self.aggregator == "median":
+            p, agg_grads = self.aggregate_fn(all_grads)
+        else:
+            p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
+            agg_grads = average_trees(all_grads, p)
         state = state.replace(params=tree_add(state.params, agg_grads))
         return ServerStepResult(
             loss=np.mean(all_losses),
