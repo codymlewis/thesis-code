@@ -13,7 +13,7 @@ for dataset in "mnist" "cifar10" "kddcup99"; do
       # for adversary_type in "none" "labelflipper" "scaling_labelflipper" "backdoor" "scaling_backdoor" "freerider" "onoff_labelflipper" "onoff_backdoor" "onoff_freerider" "goodmouther" "badmouther"; do
       for adversary_type in "none" "labelflipper" "backdoor" "freerider" "onoff_labelflipper" "onoff_freerider" "goodmouther" "badmouther"; do
         for percent_adversaries in "0.1" "0.3" "0.5"; do
-          repeat_experiment "python main.py --clients 100 --rounds 500 --epochs 10 --dataset $dataset --aggregator $aggregator --compressor $compressor --adversary-type $adversary_type --percent_adversaries $percent_adversaries" 5
+          repeat_experiment "python main.py --clients 100 --rounds 500 --epochs 10 --dataset $dataset --aggregator $aggregator --compressor $compressor --adversary-type $adversary_type --percent-adversaries $percent_adversaries" 5
         done
       done
     done
