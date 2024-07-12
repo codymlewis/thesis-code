@@ -125,7 +125,7 @@ def fedavg(all_grads, unused_state):
 
 
 @jax.jit
-def median(all_grads):
+def median(all_grads, unused_state):
     "Median aggregation algorithm with some added complexity for metric compatibility"
     agg_grads = jax.tree.map(lambda *x: jnp.median(jnp.array(x), axis=0), *all_grads)
     G = jnp.array([jax.flatten_util.ravel_pytree(g)[0] for g in all_grads])
@@ -438,7 +438,7 @@ class Server:
         all_grads, all_losses = self.network.step(state, epochs=self.epochs, batch_size=self.batch_size)
         all_grads = self.decompress(self.network.clients, all_grads)
         if self.aggregator == "median":
-            p, agg_grads = self.aggregate_fn(all_grads)
+            p, agg_grads = self.aggregate_fn(all_grads, self.aggregate_state)
         else:
             p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
             agg_grads = average_trees(all_grads, p)

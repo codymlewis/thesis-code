@@ -107,6 +107,124 @@ def write_results(results_filename, experiment_config, acc_val, asr_val):
     return f"Results written to {results_filename}"
 
 
+def get_dataset(dataset_name):
+    match dataset_name:
+        case "mnist":
+            return mnist()
+        case "cifar10":
+            return cifar10()
+        case "kddcup99":
+            return kddcup99()
+        case _:
+            raise NotImplementedError(f"{args.dataset} not implemented")
+
+
+def create_global_model(dataset_name, dataset, nclasses, learning_rate, compressor_name, epochs, seed):
+    if dataset_name == "cifar10":
+        model = fl.LeNet5(nclasses)
+    else:
+        model = fl.LeNet_300_100(nclasses)
+    opt = optax.sgd(learning_rate)
+    if compressor_name == "fedprox":
+        opt = compressor.pgd(opt, 0.00001, local_epochs=epochs)
+    return train_state.TrainState.create(
+        apply_fn=model.apply,
+        params=model.init(jax.random.PRNGKey(seed), dataset['train']['X'][:1]),
+        tx=opt,
+    )
+
+
+def get_adversary_class_and_attack(adversary_type_name, dataset_name):
+    attack_mapping = {}
+    match adversary_type_name:
+        case "labelflipper" | "scaling_labelflipper":
+            attack_mapping = {"from": 0, "to": 11 if dataset == "kddcup99" else 1}
+            adversary_type = functools.partial(
+                adversary.LabelFlipper,
+                label_mapping=attack_mapping,
+            )
+        case "backdoor" | "scaling_backdoor":
+            match dataset:
+                case "mnist":
+                    trigger = np.zeros((28, 28, 1))
+                    trigger[:5, :5, :] = 1
+                case "cifar10":
+                    trigger = np.zeros((32, 32, 3))
+                    trigger[:5, :5, :] = 1
+                case "kddcup99":
+                    trigger = np.zeros((42,))
+                    trigger[:5] = 1
+            attack_mapping = {
+                "from": 0,
+                "to": 11 if dataset == "kddcup99" else 1,
+                "trigger": trigger,
+            }
+            adversary_type = functools.partial(
+                adversary.Backdoor,
+                backdoor_mapping=backdoor_mapping,
+            )
+        case "freerider":
+            adversary_type = adversary.FreeRider
+        case "onoff_labelflipper":
+            attack_mapping = {"from": 0, "to": 11 if dataset == "kddcup99" else 1}
+            adversary_type = functools.partial(
+                adversary.OnOffLabelFlipper,
+                label_mapping=attack_mapping,
+            )
+        case "onoff_backdoor":
+            match dataset:
+                case "mnist":
+                    trigger = np.zeros((28, 28, 1))
+                    trigger[:5, :5, :] = 1
+                case "cifar10":
+                    trigger = np.zeros((32, 32, 3))
+                    trigger[:5, :5, :] = 1
+                case "kddcup99":
+                    trigger = np.zeros((42,))
+                    trigger[:5] = 1
+            attack_mapping = {
+                "from": 0,
+                "to": 11 if dataset == "kddcup99" else 1,
+                "trigger": trigger,
+            }
+            adversary_type = functools.partial(
+                adversary.OnOffBackdoor,
+                backdoor_mapping=attack_mapping,
+            )
+        case "onoff_freerider":
+            adversary_type = adversary.OnOffFreeRider
+        case _:
+            adversary_type = fl.Client
+    return adversary_type, attack_mapping
+
+
+def get_network_type(aggregator_name, adversary_type_name, percent_adversaries, global_state, attack_mapping):
+    match adversary_type_name:
+        case "scaling_labelflipper" | "scaling_backdoor":
+            network_type = functools.partial(
+                adversary.ScalerNetwork,
+                percent_adversaries=percent_adversaries,
+            )
+        case "badmouther" | "goodmouther":
+            attack_mapping["mouthing_victim"] = 0
+            network_type = functools.partial(
+                adversary.MoutherNetwork,
+                percent_adversaries=percent_adversaries,
+                victim_id=attack_mapping["mouthing_victim"],
+                attack_type=adversary_type,
+            )
+        case "onoff_labelflipper" | "onoff_backdoor" | "onoff_freerider":
+            network_type = functools.partial(
+                adversary.OnOffNetwork,
+                state=global_state,
+                percent_adversaries=percent_adversaries,
+                aggregator=aggregator_name,
+            )
+        case _:
+            network_type = fl.Network
+    return network_type, attack_mapping
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Perform the Viceroy experiments")
     parser.add_argument('-s', '--seed', type=int, default=42, help="Seed for random number generation operations.")
@@ -124,114 +242,30 @@ if __name__ == "__main__":
     parser.add_argument("--compressor", type=str, default="none",
                         help="Compression algorithm to use on the gradients")
     args = parser.parse_args()
+    print(f"Running experiment with config: {vars(args)}")
 
     rng = np.random.default_rng(args.seed)
-    match args.dataset:
-        case "mnist":
-            dataset, nclasses = mnist()
-        case "cifar10":
-            dataset, nclasses = cifar10()
-        case "kddcup99":
-            dataset, nclasses = kddcup99()
-        case _:
-            raise NotImplementedError(f"{args.dataset} not implemented")
-
-    if args.dataset == "cifar10":
-        model = fl.LeNet5(nclasses)
-    else:
-        model = fl.LeNet_300_100(nclasses)
-    opt = optax.sgd(args.learning_rate)
-    if args.compressor == "fedprox":
-        opt = compressor.pgd(opt, 0.00001, local_epochs=args.epochs)
-    global_state = train_state.TrainState.create(
-        apply_fn=model.apply,
-        params=model.init(jax.random.PRNGKey(args.seed), dataset['train']['X'][:1]),
-        tx=opt,
+    dataset, nclasses = get_dataset(args.dataset)
+    global_state = create_global_model(
+        args.dataset,
+        dataset,
+        nclasses,
+        args.learning_rate,
+        args.compressor,
+        args.epochs,
+        args.seed,
     )
-
-    match args.adversary_type:
-        case "labelflipper" | "scaling_labelflipper":
-            label_mapping = {"from": 0, "to": 11 if args.dataset == "kddcup99" else 1}
-            adversary_type = functools.partial(
-                adversary.LabelFlipper,
-                label_mapping=label_mapping,
-            )
-        case "backdoor" | "scaling_backdoor":
-            match args.dataset:
-                case "mnist":
-                    trigger = np.zeros((28, 28, 1))
-                    trigger[:5, :5, :] = 1
-                case "cifar10":
-                    trigger = np.zeros((32, 32, 3))
-                    trigger[:5, :5, :] = 1
-                case "kddcup99":
-                    trigger = np.zeros((42,))
-                    trigger[:5] = 1
-            backdoor_mapping = {
-                "from": 0,
-                "to": 11 if args.dataset == "kddcup99" else 1,
-                "trigger": trigger,
-            }
-            adversary_type = functools.partial(
-                adversary.Backdoor,
-                backdoor_mapping=backdoor_mapping,
-            )
-        case "freerider":
-            adversary_type = adversary.FreeRider
-        case "onoff_labelflipper":
-            label_mapping = {"from": 0, "to": 11 if args.dataset == "kddcup99" else 1}
-            adversary_type = functools.partial(
-                adversary.OnOffLabelFlipper,
-                label_mapping=label_mapping,
-            )
-        case "onoff_backdoor":
-            match args.dataset:
-                case "mnist":
-                    trigger = np.zeros((28, 28, 1))
-                    trigger[:5, :5, :] = 1
-                case "cifar10":
-                    trigger = np.zeros((32, 32, 3))
-                    trigger[:5, :5, :] = 1
-                case "kddcup99":
-                    trigger = np.zeros((42,))
-                    trigger[:5] = 1
-            backdoor_mapping = {
-                "from": 0,
-                "to": 11 if args.dataset == "kddcup99" else 1,
-                "trigger": trigger,
-            }
-            adversary_type = functools.partial(
-                adversary.OnOffBackdoor,
-                backdoor_mapping=backdoor_mapping,
-            )
-        case "onoff_freerider":
-            adversary_type = adversary.OnOffFreeRider
-        case _:
-            adversary_type = fl.Client
-
-    match args.adversary_type:
-        case "scaling_labelflipper" | "scaling_backdoor":
-            network_type = functools.partial(
-                adversary.ScalerNetwork,
-                percent_adversaries=args.percent_adversaries,
-            )
-        case "badmouther" | "goodmouther":
-            mouthing_victim = 0
-            network_type = functools.partial(
-                adversary.MoutherNetwork,
-                percent_adversaries=args.percent_adversaries,
-                victim_id=mouthing_victim,
-                attack_type=args.adversary_type,
-            )
-        case "onoff_labelflipper" | "onoff_backdoor" | "onoff_freerider":
-            network_type = functools.partial(
-                adversary.OnOffNetwork,
-                state=global_state,
-                percent_adversaries=args.percent_adversaries,
-                aggregator=args.aggregator,
-            )
-        case _:
-            network_type = fl.Network
+    adversary_type, attack_mapping = get_adversary_class_and_attack(
+        args.adversary_type,
+        args.dataset,
+    )
+    network_type, attack_mapping = get_network_type(
+        args.aggregator,
+        args.adversary_type,
+        args.percent_adversaries,
+        global_state,
+        attack_mapping,
+    )
 
     data_distribution = lda(
         dataset['train']['Y'],
@@ -279,13 +313,13 @@ if __name__ == "__main__":
             asr_vals[r] = adversary.goodmouther_asr(
                 step_result.aggregated_grads,
                 step_result.all_grads,
-                mouthing_victim,
+                attack_mapping["mouthing_victim"],
             )
         if args.adversary_type == "badmouther":
             asr_vals[r] = adversary.badmouther_asr(
                 step_result.aggregated_grads,
                 step_result.all_grads,
-                mouthing_victim,
+                attack_mapping["mouthing_victim"],
             )
 
     acc_val = server.test(global_state, dataset['test'])
@@ -294,11 +328,11 @@ if __name__ == "__main__":
     match args.adversary_type:
         case "labelflipper" | "scaling_labelflipper" | "onoff_labelflipper":
             asr_val = adversary.labelflipper_asr(
-                global_state, dataset['test']["X"], dataset['test']["Y"], label_mapping
+                global_state, dataset['test']["X"], dataset['test']["Y"], attack_mapping
             )
         case "backdoor" | "scaling_backdoor" | "onoff_backdoor":
             asr_val = adversary.backdoor_asr(
-                global_state, dataset['test']["X"], dataset['test']["Y"], backdoor_mapping
+                global_state, dataset['test']["X"], dataset['test']["Y"], attack_mapping
             )
         case "freerider" | "onoff_freerider" | "goodmouther" | "badmouther":
             asr_val = np.mean(asr_vals)
