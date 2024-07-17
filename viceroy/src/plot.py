@@ -4,18 +4,21 @@ import numpy as np
 import polars as pl
 
 
-def plot_performance(data_filename, plot_filename):
+def plot_performance(data_filename, plot_filename, shade_on_state=False):
     df = pl.read_csv(data_filename)
     fig, ax = plt.subplots(1, 1)
     ax.plot(df["accuracy"], '-o', markevery=250, label="Accuracy", zorder=2)
     ax.plot(df["asr"], '-s', markevery=250, label="ASR", zorder=1)
-    # ax.fill_between(
-    #     np.arange(len(df["toggle_state"])),
-    #     1.0,
-    #     where=df["toggle_state"],
-    #     facecolor='red',
-    #     alpha=0.25,
-    # )
+
+    if shade_on_state:
+        ax.fill_between(
+            np.arange(len(df["toggle_state"])),
+            1.0,
+            where=df["toggle_state"],
+            facecolor='red',
+            alpha=0.25,
+        )
+
     ax.set_ylim((-0.05, 1.05))
     ax.set_xlabel("Round")
     ax.set_ylabel("Rate")
@@ -44,8 +47,7 @@ def plot_influence(data_filename, plot_filename):
     return f"Saved plot to {plot_filename}"
 
 
-
 if __name__ == "__main__":
     os.makedirs("plots", exist_ok=True)
-    # print(plot_performance("results/performance.csv", "plots/performance.pdf"))
+    print(plot_performance("results/performance.csv", "plots/performance.pdf"))
     print(plot_influence("results/influence.csv", "plots/influence.pdf"))

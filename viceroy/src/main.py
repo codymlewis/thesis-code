@@ -11,7 +11,7 @@ import numpy as np
 import jax
 from flax.training import train_state
 import optax
-from tqdm import trange
+from tqdm import trange, tqdm
 import psutil
 
 import fl

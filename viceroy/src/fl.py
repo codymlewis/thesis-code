@@ -106,13 +106,12 @@ def foolsgold(all_grads, state):
     cs = jnp.where(pardon_idx > 0, cs * pardon_idx, cs)
     # Prevent invalid values
     wv = 1 - (jnp.max(cs, axis=1))
-    wv = jnp.where(wv > 1, 1, wv)
-    wv = jnp.where(wv < 0, 0, wv)
+    wv = jnp.clip(wv, 0.0, 1.0)
     wv = wv / jnp.max(wv)  # Rescale to [0, 1]
     wv = jnp.where(wv == 1, 0.99, wv)
     wv = jnp.where(wv != 0, state.kappa * (jnp.log(wv / (1 - wv)) + 0.5), wv)  # Logit function
     wv = jnp.where(jnp.isinf(wv) + wv > 1, 1, wv)
-    wv = jnp.where(wv < 1, 0, wv)
+    wv = jnp.where(wv < 0, 0, wv)
     return wv, FoolsGoldState(kappa=state.kappa, histories=histories)
 
 
