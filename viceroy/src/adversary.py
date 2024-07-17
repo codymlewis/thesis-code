@@ -152,8 +152,8 @@ class OnOffNetwork(fl.Network):
         percent_adversaries,
         aggregator,
         start_on=False,
-        beta=1.0,
-        gamma=0.85,
+        beta=0.6,
+        gamma=0.2,
     ):
         super().__init__(clients)
         self.percent_adversaries = percent_adversaries
@@ -170,22 +170,19 @@ class OnOffNetwork(fl.Network):
         self.beta = beta
         self.gamma = gamma
         self.sharp = aggregator in ["fedavg", "stddagmm", "krum"]
-        # self.timer = 0
 
     def step(self, state, epochs, batch_size):
         all_grads, all_losses = super().step(state, epochs, batch_size)
         p, self.aggregate_state = self.aggregate_fn(all_grads, self.aggregate_state)
         num_adversaries = round(self.percent_adversaries * len(all_grads))
         avg_adversary_p = p[-num_adversaries:].mean()
-        # self.timer += 1
-        upper_bound = self.attacking and (avg_adversary_p > self.beta * self.max_p)
+        stop_attacking = self.attacking and (avg_adversary_p < (self.beta * self.max_p))
         if self.sharp:
-            lower_bound = not self.attacking and (avg_adversary_p < 0.4 * self.max_p)
+            start_attacking = not self.attacking and (avg_adversary_p > (0.4 * self.max_p))
         else:
-            lower_bound = not self.attacking and (avg_adversary_p < self.gamma * self.max_p)
+            start_attacking = not self.attacking and (avg_adversary_p > (self.gamma * self.max_p))
 
-        # if (self.timer % 30) == 0:
-        if upper_bound or lower_bound:
+        if stop_attacking or start_attacking:
             self.attacking = not self.attacking
             for client in self.clients[-num_adversaries:]:
                 if isinstance(client, OnOffFreeRider):
