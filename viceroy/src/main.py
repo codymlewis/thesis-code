@@ -254,13 +254,14 @@ def get_network_type(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Perform the Viceroy experiments")
     parser.add_argument('-s', '--seed', type=int, default=42, help="Seed for random number generation operations.")
-    parser.add_argument('-b', '--batch-size', type=int, default=128, help="Training and evaluation batch size.")
+    parser.add_argument('-b', '--batch-size', type=int, default=8, help="Training and evaluation batch size.")
     parser.add_argument('-d', '--dataset', type=str, default="mnist", help="Dataset to train on.")
     parser.add_argument("-a", "--aggregator", type=str, default="fedavg", help="Aggregation function to use.")
     parser.add_argument("-c", "--clients", type=int, default=10, help="Number of clients to train.")
     parser.add_argument("-r", "--rounds", type=int, default=500, help="Number of rounds to train for.")
     parser.add_argument("-e", "--epochs", type=int, default=1, help="Number of epochs to train for.")
-    parser.add_argument('-lr', '--learning-rate', type=float, default=0.1, help="Learning rate to use for training.")
+    parser.add_argument('-lr', '--learning-rate', type=float, default=0.01,
+                        help="Learning rate to use for training.")
     parser.add_argument("--adversary-type", type=str, default="none",
                         help="Type of adversary to simulate in the system.")
     parser.add_argument("--percent-adversaries", type=float, default=0.0,
@@ -348,6 +349,8 @@ if __name__ == "__main__":
         if "onoff" in args.adversary_type:
             toggle_state[0] = server.network.attacking
         # Note: this is missing freerider and mouthing attacks, but they don't get used anyway
+    if args.save_influence:
+        p_vals = np.zeros((args.rounds, args.clients), dtype=np.float32)
 
     for r in (pbar := trange(args.rounds)):
         step_result = server.step(global_state)
@@ -358,6 +361,8 @@ if __name__ == "__main__":
             psutil.cpu_percent(),
         ))
 
+        if args.save_influence:
+            p_vals[r] = step_result.p
         if args.save_full_performance:
             accuracy_vals[r + 1] = server.test(global_state, dataset['test'])
             if "labelflipper" in args.adversary_type:
@@ -429,5 +434,5 @@ if __name__ == "__main__":
         print(write_influence(
             "results/influence.csv",
             args.start_on,
-            step_result.p[-num_adversaries:].mean(),
+            p_vals[:, -num_adversaries:].mean(),
         ))

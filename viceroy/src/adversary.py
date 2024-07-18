@@ -63,15 +63,13 @@ def backdoor_asr(state, X, Y, backdoor_mapping, batch_size=1000):
 class FreeRider(fl.Client):
     def __init__(self, global_state, data, compressor_name, seed=0):
         super().__init__(global_state, data, compressor_name, seed)
-        self.prev_params = None
+        self.freeride_rng_key = jax.random.PRNGKey(seed)
 
     def step(self, global_state, epochs=1, batch_size=32):
         state = global_state
-        if self.prev_params is None:
-            self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
-        grads = delta_freeride(state, global_state.params, self.prev_params)
+        self.freeride_rng_key, rng_key = jax.random.split(self.freeride_rng_key)
+        grads = delta_freeride(state, global_state.params, rng_key)
         grads = self.compress(grads)
-        self.prev_params = global_state.params
         return 0.0, grads
 
 
@@ -86,8 +84,11 @@ def freerider_asr(p, aggregator, adversary_type, network, num_adversaries):
 
 
 @jax.jit
-def delta_freeride(state, current_params, prev_params):
-    return jax.tree_map(lambda a, b: a - b, current_params, prev_params)
+def delta_freeride(state, rng_key):
+    return jax.tree_map(
+        lambda p: jax.random.normal(rng_key, shape=p.shape) * 1e-8,
+        state.params,
+    )
 
 
 class ScalerNetwork(fl.Network):
@@ -132,15 +133,13 @@ class OnOffBackdoor(fl.Client):
 class OnOffFreeRider(fl.Client):
     def __init__(self, global_state, data, compressor_name, seed=0):
         super().__init__(global_state, data, compressor_name, seed)
-        self.prev_params = None
+        self.freeride_rng_key = jax.random.PRNGKey(seed)
 
     def off_step(self, global_state, epochs=1, batch_size=32):
         state = global_state
-        if self.prev_params is None:
-            self.prev_params = jax.tree_map(jnp.zeros_like, state.params)
-        grads = delta_freeride(state, global_state.params, self.prev_params)
+        self.freeride_rng_key, rng_key = jax.random.split(self.freeride_rng_key)
+        grads = delta_freeride(state, rng_key)
         grads = self.compress(grads)
-        self.prev_params = global_state.params
         return 0.0, grads
 
 
@@ -152,8 +151,6 @@ class OnOffNetwork(fl.Network):
         percent_adversaries,
         aggregator,
         start_on=False,
-        beta=0.6,
-        gamma=0.2,
     ):
         super().__init__(clients)
         self.percent_adversaries = percent_adversaries
@@ -167,9 +164,11 @@ class OnOffNetwork(fl.Network):
                     client.step, client.off_step = client.off_step, client.step
                 else:
                     client.data, client.off_data = client.off_data, client.data
-        self.beta = beta
-        self.gamma = gamma
-        self.sharp = aggregator in ["fedavg", "stddagmm", "krum"]
+        self.beta = 0.6
+        if aggregator in ["fedavg", "stddagmm", "krum"]:
+            self.gamma = 0.4
+        else:
+            self.gamma = 0.2
 
     def step(self, state, epochs, batch_size):
         all_grads, all_losses = super().step(state, epochs, batch_size)
@@ -177,10 +176,7 @@ class OnOffNetwork(fl.Network):
         num_adversaries = round(self.percent_adversaries * len(all_grads))
         avg_adversary_p = p[-num_adversaries:].mean()
         stop_attacking = self.attacking and (avg_adversary_p < (self.beta * self.max_p))
-        if self.sharp:
-            start_attacking = not self.attacking and (avg_adversary_p > (0.4 * self.max_p))
-        else:
-            start_attacking = not self.attacking and (avg_adversary_p > (self.gamma * self.max_p))
+        start_attacking = not self.attacking and (avg_adversary_p > (self.gamma * self.max_p))
 
         if stop_attacking or start_attacking:
             self.attacking = not self.attacking
