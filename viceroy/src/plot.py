@@ -30,6 +30,7 @@ def plot_performance(data_filename, plot_filename, shade_on_state=False):
     ])
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2, frameon=False)
     plt.savefig(plot_filename)
+    plt.clf()
     return f"Saved plot to {plot_filename}"
 
 
@@ -44,6 +45,7 @@ def plot_influence(data_filename, plot_filename):
     plt.xlabel("Starting state")
     plt.xticks([1, 2], ["On", "Off"])
     plt.savefig(plot_filename)
+    plt.clf()
     return f"Saved plot to {plot_filename}"
 
 
