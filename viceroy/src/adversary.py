@@ -164,11 +164,16 @@ class OnOffNetwork(fl.Network):
                     client.step, client.off_step = client.off_step, client.step
                 else:
                     client.data, client.off_data = client.off_data, client.data
-        self.beta = 0.6
-        if aggregator in ["fedavg", "stddagmm", "krum"]:
-            self.gamma = 0.4
-        else:
-            self.gamma = 0.2
+        match aggregator:
+            case "fedavg" | "stddagmm" | "krum":
+                self.gamma = 0.4
+                self.beta = 0.6
+            case "foolsgold" | "viceroy":
+                self.gamma = 0.2
+                self.beta = 0.8
+            case _:
+                self.gamma = 0.2
+                self.beta = 0.6
 
     def step(self, state, epochs, batch_size):
         all_grads, all_losses = super().step(state, epochs, batch_size)
