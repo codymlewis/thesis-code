@@ -9,7 +9,6 @@ h5py==3.11.0
 einops==0.7.0
 Pillow==10.4.0
 tqdm==4.66.3
-scikit-learn
 psutil==6.0.0
 matplotlib==3.9.1
 numpy==1.26.4
