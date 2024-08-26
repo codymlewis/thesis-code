@@ -28,3 +28,4 @@ numba==0.60.0
 safetensors==0.4.1
 l2rpn-baselines==0.8.0
 stable-baselines3==2.2.1
+graphviz==0.20.3

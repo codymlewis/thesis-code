@@ -5,3 +5,5 @@ data/
 results.csv
 results/
 plots/
+*.gv
+*.pdf
