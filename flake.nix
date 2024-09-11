@@ -43,8 +43,8 @@
               else
                 source venv/bin/activate
               fi
-              if [ ! -d smahfl/data/ ]; then
-                cd smahfl/data_processing/
+              if [ ! -d sghfl/data/ ]; then
+                cd sghfl/data_processing/
                 python acquire.py
                 cd ../../
               fi
