@@ -1,6 +1,6 @@
 # On the Security and Robustness of Federated Learning with Application to the Smart Grid Infrastructure
 
-Source code repository for my thesis work. A link to the thesis itself will be here soon.
+Source code repository for my thesis work. My thesis can be found at https://nova.newcastle.edu.au/vital/access/manager/Repository/uon:57135
 
 ## Summary
 
